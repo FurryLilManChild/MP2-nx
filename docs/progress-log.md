@@ -2,6 +2,16 @@
 
 Newest first.
 
+## 2026-10-29: paused (pick up here)
+
+- Paused by the owner until Sonic Adventure or Sonic Heroes is finished.
+- Done: CMake, Ninja and patch installed in MSYS2. devkitPro core updated (`pacman -Syu`), but the Switch portlibs
+  were not installed yet: the core update stopped pacman before the install step.
+- Next on resume: the owner runs, in a new PowerShell window,
+  `C:\devkitPro\msys2\usr\bin\bash.exe -lc "pacman -S --needed --noconfirm switch-dev switch-libzstd switch-bzip2 switch-liblzma switch-freetype switch-harfbuzz switch-libpng switch-curl switch-libexpat"`
+  (names checked against his dkp-libs.db). Then verify the .a files, pin an Echoes Unbound release (0.6.2 was
+  current), study the Twilight Princess Switch layer, and write the mp2-nx build script.
+
 ## 2026-10-29: kickoff
 
 - Chose the route: Echoes Unbound (decomp-based native PC port on Aurora) plus an Aurora/Dawn Switch layer on NVK,
