@@ -1,0 +1,30 @@
+# Game data and anything derived from it: never commit
+assets/
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.wia
+*.gcz
+*.wbfs
+orig/
+*.dol
+*.rel
+
+# Third-party SDKs and fetched sources
+sdk/
+ref/
+extern-cache/
+
+# Build output, staging, caches, logs
+out/
+build*/
+*.nro
+*.nacp
+*.elf
+pc-baseline/
+switch_sd/
+switchlogs/
+*.db
+*.log
+user/
