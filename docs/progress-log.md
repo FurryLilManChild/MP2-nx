@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-03: first NRO (switch-test1, boot test)
+
+- Linked: `mp2-nx.nro` 61.6 MB, sha256 44a729b1acd49e945acdeb00ed3d9754d5ea9bd5f355d3540da766cf024cd8b4. Symbols-only
+  ELF for addr2line: `C:\MP2-nx\out\elf\mp2-nx-test1-syms.elf.gz`.
+- Link fixes: POSIX stubs (pipe, waitpid, execvp, ttyname, geteuid, fchown, flock; `switch/source/platform/posix_stubs.cpp`),
+  `nod_partition_is_wii` added to the nod shim, the nod shim built as PIC (its .rodata tables needed run-time
+  relocation in a read-only segment: "read-only segment has dynamic relocations").
+- Dawn's `ninja install` builds every target and some do not build for Horizon (absl failure_signal_handler), so
+  build_deps.sh installs only the stripped monolithic library (1.7 GB to 40 MB), the headers and a DawnConfig.
+- Prebuilt Dawn and SDL3 saved to the owner's PC: `C:\MP2-nx\out\cache\mp2nx-prefix-dawn1155e0ed-sdl3.tar.gz`.
+- Workspace note: the cloud workspace restarted twice and took dockerd with it; run dockerd with nohup and keep long
+  waits in the background. `cmake --fresh` forced full recompiles; the configure no longer uses it.
+
 ## 2026-11-03: resumed, Switch build bring-up (cloud builds, per the owner)
 
 - Renderer plan: deko3d is the goal (mkdd-nx 1.8.0 measured about 42 to 59.9 fps going from OpenGL to deko3d), but

@@ -69,6 +69,9 @@ target_include_directories(mp2nx_nod
   PRIVATE "${MP2NX_ROOT}/switch/include" "${DEVKITPRO}/portlibs/switch/include")
 target_compile_definitions(mp2nx_nod PRIVATE DUSK_WII_KEY_DIR="sdmc:/switch/mp2-nx")
 target_compile_features(mp2nx_nod PUBLIC cxx_std_20)
+# Created before the platform module turns PIC on for new targets; the NRO is a PIE, and
+# position-dependent tables in .rodata would need relocating at run time.
+set_target_properties(mp2nx_nod PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(mp2nx_nod PUBLIC
   ${DEVKITPRO}/portlibs/switch/lib/libzstd.a ${DEVKITPRO}/portlibs/switch/lib/libbz2.a
   ${DEVKITPRO}/portlibs/switch/lib/liblzma.a ${DEVKITPRO}/portlibs/switch/lib/libz.a)
