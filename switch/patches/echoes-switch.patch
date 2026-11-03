@@ -1,0 +1,91 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ef1c8c60d..a77862d12 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
+         # the whole point is naming the function that faulted. This is the only place it is
+         # needed: the decomp build links no platform code and the gate's port build inherits
+         # it from here. Android has no `execinfo`/`backtrace`, so it is desktop-only.
+-        target_link_options(metroid_prime2_port PRIVATE -rdynamic)
++        if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++            target_link_options(metroid_prime2_port PRIVATE -rdynamic)
++        endif()
+     endif()
+ elseif(APPLE)
+     # ld64 searches every archive again until nothing new resolves, so the cycle needs no
+@@ -1105,3 +1107,23 @@ if(NOT ANDROID AND NOT IOS)
+             DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+     endif()
+ endif()
++
++# mp2-nx: the Nintendo Switch build (https://github.com/FurryLilManChild/mp2-nx). Its
++# dependencies are decided by switch/cmake/mp2_switch_deps.cmake, injected ahead of this
++# file; here the Horizon start-up, the low-address REL arena and the NRO are added.
++if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++    target_sources(metroid_prime2_port PRIVATE
++        ${MP2NX_ROOT}/switch/source/platform/startup.cpp
++        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp)
++    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
++    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
++    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
++    set_source_files_properties(platform/port_console.cpp PROPERTIES COMPILE_OPTIONS "-include;arpa/inet.h")
++    # SQLite: no mmap or shared-memory WAL on Horizon, and no extension loading.
++    if(TARGET sqlite3)
++        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0
++            SQLITE_OMIT_LOAD_EXTENSION=1)
++    endif()
++    nx_generate_nacp(mp2-nx.nacp NAME "Metroid Prime 2: Echoes" AUTHOR "mp2-nx" VERSION "0.1.0")
++    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
++endif()
+diff --git a/platform/rel.cpp b/platform/rel.cpp
+index f4ff077ce..d81a034e8 100644
+--- a/platform/rel.cpp
++++ b/platform/rel.cpp
+@@ -380,6 +380,11 @@ static uintptr_t FindArenaGapBelow4GiB(size_t size) {
+ }
+ #endif
+ 
++#if defined(__SWITCH__)
++extern "C" void* mp2nx_low_arena_alloc(size_t size, uint32_t preferredBase);
++extern "C" void mp2nx_low_arena_free(void* base);
++#endif
++
+ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
+   if (size == 0) {
+     return;
+@@ -389,7 +394,10 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
+   // say why it failed without changing what any other path prints.
+   bool portableFallback = false;
+ 
+-#if defined(_WIN32)
++#if defined(__SWITCH__)
++  // mp2-nx: Horizon has no mmap; switch/source/platform/low_arena.cpp maps heap pages below 4 GiB.
++  void* base = mp2nx_low_arena_alloc(size, preferredBase);
++#elif defined(_WIN32)
+   void* base = preferredBase != 0
+                    ? VirtualAlloc(reinterpret_cast<void*>(static_cast<uintptr_t>(preferredBase)), size,
+                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
+@@ -456,7 +464,11 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
+                    "metroid_prime2_port: no REL arena: could not map %zu bytes below 4 GiB (%s)\n",
+                    size, base == nullptr ? "no addressable low mapping" : "the mapping landed too high");
+     }
+-#if defined(_WIN32)
++#if defined(__SWITCH__)
++    if (base != nullptr) {
++      mp2nx_low_arena_free(base);
++    }
++#elif defined(_WIN32)
+     if (base != nullptr) {
+       VirtualFree(base, 0, MEM_RELEASE);
+     }
+@@ -476,7 +488,9 @@ GuestArena::~GuestArena() {
+   if (m_base == nullptr) {
+     return;
+   }
+-#if defined(_WIN32)
++#if defined(__SWITCH__)
++  mp2nx_low_arena_free(m_base);
++#elif defined(_WIN32)
+   VirtualFree(m_base, 0, MEM_RELEASE);
+ #else
+   munmap(m_base, m_size);

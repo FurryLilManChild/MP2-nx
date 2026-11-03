@@ -1,0 +1,3 @@
+[submodule "extern/echoes"]
+	path = extern/echoes
+	url = https://github.com/Odrannnn/MetroidPrime2Port

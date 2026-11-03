@@ -1,0 +1,237 @@
+// mp2-nx: how the program starts and stops on Horizon.
+//
+// libnx runs userAppInit before main() and userAppExit after it, and reads a few
+// symbols the program may define (__nx_applet_type, __nx_heap_size). This file defines
+// them, opens the logs, points Echoes Unbound at its folders through the environment
+// variables it already reads (MP2_USER_PATH, MP2_CACHE_PATH, MP2_DISC), and installs a
+// crash handler that writes straight to the SD card.
+#include <switch.h>
+
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+
+#define MP2NX_DIR "sdmc:/switch/mp2-nx"
+
+// SQLite (the pipeline and Dawn caches): its default unix VFS takes fcntl locks, which
+// libnx does not have. "unix-none" is the same VFS without locking; only this process
+// ever opens these files.
+extern "C" {
+struct sqlite3_vfs;
+sqlite3_vfs* sqlite3_vfs_find(const char* name);
+int sqlite3_vfs_register(sqlite3_vfs* vfs, int makeDefault);
+}
+
+extern "C" {
+
+// A full application (title takeover): the Album applet gets a fraction of the memory.
+u32 __nx_applet_type = AppletType_Application;
+// 0: libnx gives the heap everything the system leaves over.
+size_t __nx_heap_size = 0;
+
+}  // extern "C"
+
+namespace {
+
+// One file per stream: Horizon refuses a second write handle on an open file, so a
+// shared file would silently lose one of them.
+void open_logs() {
+  mkdir(MP2NX_DIR, 0777);
+  mkdir(MP2NX_DIR "/logs", 0777);
+  // The previous run's logs are kept as *.prev.log.
+  remove(MP2NX_DIR "/logs/mp2-nx.prev.log");
+  rename(MP2NX_DIR "/logs/mp2-nx.log", MP2NX_DIR "/logs/mp2-nx.prev.log");
+  remove(MP2NX_DIR "/logs/mp2-nx.err.prev.log");
+  rename(MP2NX_DIR "/logs/mp2-nx.err.log", MP2NX_DIR "/logs/mp2-nx.err.prev.log");
+  if (std::freopen(MP2NX_DIR "/logs/mp2-nx.log", "w", stdout) != nullptr) {
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+  }
+  if (std::freopen(MP2NX_DIR "/logs/mp2-nx.err.log", "w", stderr) != nullptr) {
+    std::setvbuf(stderr, nullptr, _IOLBF, 0);
+  }
+}
+
+bool has_suffix(const char* name, const char* suffix) {
+  const size_t n = std::strlen(name);
+  const size_t s = std::strlen(suffix);
+  return n >= s && strcasecmp(name + n - s, suffix) == 0;
+}
+
+// The disc image in the app folder: an .iso or .gcm first, then .rvz, .wia, .gcz, .ciso.
+std::string find_disc() {
+  static const char* const kOrder[] = {".iso", ".gcm", ".rvz", ".wia", ".gcz", ".ciso"};
+  for (const char* ext : kOrder) {
+    DIR* dir = opendir(MP2NX_DIR);
+    if (dir == nullptr) {
+      return {};
+    }
+    while (dirent* e = readdir(dir)) {
+      if (e->d_name[0] != '.' && has_suffix(e->d_name, ext)) {
+        std::string path = std::string{MP2NX_DIR "/"} + e->d_name;
+        closedir(dir);
+        return path;
+      }
+    }
+    closedir(dir);
+  }
+  return {};
+}
+
+void show_message_and_exit(const char* text) {
+  consoleInit(nullptr);
+  padConfigureInput(1, HidNpadStyleSet_NpadStandard);
+  PadState pad;
+  padInitializeDefault(&pad);
+  std::printf("\n  Metroid Prime 2: Echoes (mp2-nx)\n\n%s\n\n  Press + to exit.\n", text);
+  while (appletMainLoop()) {
+    padUpdate(&pad);
+    if (padGetButtonsDown(&pad) & HidNpadButton_Plus) {
+      break;
+    }
+    consoleUpdate(nullptr);
+  }
+  consoleExit(nullptr);
+  std::exit(0);
+}
+
+}  // namespace
+
+extern "C" void userAppInit(void) {
+  romfsInit();
+  // NVK refuses to start without this (Alek's Switch layer sets it the same way).
+  setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
+  nvInitialize();  // the GPU service the Vulkan driver talks to
+  open_logs();
+
+  const AppletType type = appletGetAppletType();
+  u64 total = 0;
+  svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
+  std::printf("mp2-nx: applet type %d, %llu MiB of memory\n", static_cast<int>(type),
+              static_cast<unsigned long long>(total >> 20));
+  if (type != AppletType_Application && type != AppletType_SystemApplication) {
+    show_message_and_exit(
+        "  This needs the memory of a full application.\n"
+        "  Start it with title takeover: hold R while opening any game\n"
+        "  from the HOME menu, then pick mp2-nx. Not from the Album.");
+  }
+
+  if (sqlite3_vfs* vfs = sqlite3_vfs_find("unix-none")) {
+    sqlite3_vfs_register(vfs, 1);
+  }
+
+  mkdir(MP2NX_DIR "/user", 0777);
+  mkdir(MP2NX_DIR "/cache", 0777);
+  if (std::getenv("MP2_USER_PATH") == nullptr) {
+    setenv("MP2_USER_PATH", MP2NX_DIR "/user", 1);
+  }
+  if (std::getenv("MP2_CACHE_PATH") == nullptr) {
+    setenv("MP2_CACHE_PATH", MP2NX_DIR "/cache", 1);
+  }
+  const std::string disc = find_disc();
+  if (disc.empty()) {
+    show_message_and_exit(
+        "  No disc image found.\n"
+        "  Copy your Metroid Prime 2: Echoes (USA) image (.iso or .rvz)\n"
+        "  into sdmc:/switch/mp2-nx/ next to mp2-nx.nro.");
+  }
+  setenv("MP2_DISC", disc.c_str(), 1);
+  std::printf("mp2-nx: disc %s\n", disc.c_str());
+}
+
+extern "C" void userAppExit(void) {
+  std::fflush(stdout);
+  std::fflush(stderr);
+  nvExit();
+  romfsExit();
+}
+
+// ---------------------------------------------------------------------------------
+// Crash handler. libnx calls __libnx_exception_handler on its own small stack for any
+// CPU exception. It writes through fsFileWrite only (no malloc, no stdio), so a crash
+// inside malloc or under a stdio lock still gets logged. Addresses are also given as
+// offsets from the start of the program, which addr2line resolves against the ELF.
+extern "C" {
+alignas(16) u8 __nx_exception_stack[0x8000];
+u64 __nx_exception_stack_size = sizeof(__nx_exception_stack);
+extern char __start__;  // libnx's start of the program image
+}
+
+namespace {
+int put_hex(char* out, u64 v) {
+  static const char kHex[] = "0123456789abcdef";
+  char tmp[16];
+  int n = 0;
+  do {
+    tmp[n++] = kHex[v & 0xF];
+    v >>= 4;
+  } while (v != 0);
+  out[0] = '0';
+  out[1] = 'x';
+  for (int i = 0; i < n; ++i) {
+    out[2 + i] = tmp[n - 1 - i];
+  }
+  return n + 2;
+}
+int put_str(char* out, const char* s) {
+  int n = 0;
+  while (s[n] != '\0') {
+    out[n] = s[n];
+    ++n;
+  }
+  return n;
+}
+}  // namespace
+
+extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
+  char buf[2048];
+  int n = 0;
+  const u64 base = reinterpret_cast<u64>(&__start__);
+  const auto line = [&](const char* label, u64 v, bool offset) {
+    n += put_str(buf + n, label);
+    n += put_hex(buf + n, v);
+    if (offset && v >= base && v - base < 0x10000000ull) {
+      n += put_str(buf + n, " (program +");
+      n += put_hex(buf + n, v - base);
+      n += put_str(buf + n, ")");
+    }
+    buf[n++] = '\n';
+  };
+  n += put_str(buf + n, "mp2-nx crash\n");
+  line("error_desc ", ctx->error_desc, false);
+  line("pc  ", ctx->pc.x, true);
+  line("lr  ", ctx->lr.x, true);
+  line("sp  ", ctx->sp.x, false);
+  line("far ", ctx->far.x, false);
+  for (int i = 0; i < 29 && n < static_cast<int>(sizeof(buf)) - 64; ++i) {
+    char label[8] = {'x', static_cast<char>('0' + i / 10), static_cast<char>('0' + i % 10), ' ', 0};
+    line(label, ctx->cpu_gprs[i].x, true);
+  }
+  // A short stack scan: words that point into the program are likely return addresses.
+  n += put_str(buf + n, "stack:\n");
+  const u64* sp = reinterpret_cast<const u64*>(ctx->sp.x);
+  for (int i = 0, shown = 0; i < 256 && shown < 24 && n < static_cast<int>(sizeof(buf)) - 64; ++i) {
+    const u64 v = sp[i];
+    if (v >= base && v - base < 0x10000000ull) {
+      line("  ", v, true);
+      ++shown;
+    }
+  }
+
+  FsFileSystem* sd = fsdevGetDeviceFileSystem("sdmc");
+  if (sd != nullptr) {
+    static char path[FS_MAX_PATH] = "/switch/mp2-nx/logs/crash.txt";
+    fsFsDeleteFile(sd, path);
+    fsFsCreateFile(sd, path, 0, 0);
+    FsFile f;
+    if (R_SUCCEEDED(fsFsOpenFile(sd, path, FsOpenMode_Write, &f))) {
+      fsFileWrite(&f, 0, buf, static_cast<u64>(n), FsWriteOption_Flush);
+      fsFileClose(&f);
+    }
+  }
+  svcExitProcess();
+}

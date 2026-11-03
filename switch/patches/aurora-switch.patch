@@ -1,0 +1,420 @@
+diff --git a/lib/dawn/BackendBinding.cpp b/lib/dawn/BackendBinding.cpp
+index 5506949ce..5422ad727 100644
+--- a/lib/dawn/BackendBinding.cpp
++++ b/lib/dawn/BackendBinding.cpp
+@@ -1,3 +1,6 @@
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ #include "BackendBinding.hpp"
+ 
+ #include <aurora/webgpu.hpp>
+@@ -30,6 +33,12 @@ std::shared_ptr<wgpu::ChainedStruct> SetupWindowAndGetSurfaceDescriptor(SDL_Wind
+   std::shared_ptr<wgpu::SurfaceSourceWindowsHWND> desc = std::make_shared<wgpu::SurfaceSourceWindowsHWND>();
+   desc->hwnd = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+   desc->hinstance = SDL_GetPointerProperty(props, SDL_PROP_WINDOW_WIN32_INSTANCE_POINTER, nullptr);
++#elif defined(SDL_PLATFORM_SWITCH)
++  // aleks2: Horizon has no window server to ask SDL about -- the console hands
++  // the application one NWindow and that is the screen, docked or handheld.
++  static_cast<void>(props);
++  auto desc = std::make_shared<wgpu::SurfaceSourceSwitchNWindow>();
++  desc->window = nwindowGetDefault();
+   return std::move(desc);
+ #elif defined(SDL_PLATFORM_LINUX)
+   const char* driver = SDL_GetCurrentVideoDriver();
+diff --git a/lib/gfx/frame.hpp b/lib/gfx/frame.hpp
+index de8c3f93c..f02a1d834 100644
+--- a/lib/gfx/frame.hpp
++++ b/lib/gfx/frame.hpp
+@@ -7,8 +7,20 @@
+ 
+ namespace aurora::gfx::detail {
+ 
++// Frames in flight. The console's present queue is deeper than a desktop's, so it
++// keeps one more recording slot; the number of staging buffers is five on every
++// platform.
++#if defined(__SWITCH__)
++inline constexpr size_t FrameSlotCount = 3;
++#else
+ inline constexpr size_t FrameSlotCount = 2;
++#endif
++#if defined(__SWITCH__)
++// mp2-nx: five on the Switch, as in Alek's tested Switch layer (memory is tight there).
++inline constexpr size_t StagingBufferCount = 5;
++#else
+ inline constexpr size_t StagingBufferCount = FrameSlotCount + 3;
++#endif
+ 
+ const wgpu::Buffer& staging_buffer(size_t slot);
+ 
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
+index dfbba6023..0d9a1ce86 100644
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
+@@ -1,4 +1,5 @@
+ #include "pipeline_cache.hpp"
++#include "../thread.hpp"
+ 
+ #include "clear.hpp"
+ #include "fx_pipelines.hpp"
+@@ -85,6 +86,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+ constexpr size_t BuildPipelinesPerFrame = 1;
+ #endif
+ static std::vector<std::thread> g_pipelineThreads;
++#ifdef __SWITCH__
++// mp2-nx: the shader compiler (Tint) recurses deeply, and libnx threads default to 128 KiB stacks.
++static std::vector<std::unique_ptr<thread::LargeStackThread>> g_pipelineSwitchThreads;
++#endif
+ static std::atomic_bool g_pipelineThreadEnd = false;
+ static std::condition_variable g_pipelineQueueCv;
+ static std::condition_variable g_pipelineReadyCv;
+@@ -1724,10 +1729,29 @@ void initialize_pipeline_cache() {
+     g_hasPipelineThread = false;
+   } else {
+     g_hasPipelineThread = true;
++#ifdef __SWITCH__
++    // mp2-nx: one compile thread on its own core, eight MiB of stack (as Alek's Switch layer).
++    const size_t threads = 1;
++    for (size_t i = 0; i < threads; ++i) {
++      auto worker = std::make_unique<thread::LargeStackThread>();
++      if (!worker->start(8u * 1024u * 1024u, [] {
++            thread::set_current(thread::Options{.name = "Pipeline compilation",
++                                                .priority = thread::Priority::Low,
++                                                .affinity = thread::Affinity::Compile});
++            pipeline_worker();
++          })) {
++        Log.error("pipeline cache: compile thread creation failed; compiling synchronously");
++        g_hasPipelineThread = false;
++        break;
++      }
++      g_pipelineSwitchThreads.push_back(std::move(worker));
++    }
++#else
+     const size_t threads = pipeline_thread_count();
+     for (size_t i = 0; i < threads; ++i) {
+       g_pipelineThreads.emplace_back(pipeline_worker);
+     }
++#endif
+     Log.info("pipeline cache: {} compile thread(s)", threads);
+   }
+ 
+@@ -1750,6 +1774,12 @@ void shutdown_pipeline_cache() {
+       thread.join();
+     }
+     g_pipelineThreads.clear();
++#ifdef __SWITCH__
++    for (auto& worker : g_pipelineSwitchThreads) {
++      worker->join();
++    }
++    g_pipelineSwitchThreads.clear();
++#endif
+   }
+   g_hasPipelineThread = false;
+ 
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
+index efddaaf2a..f667bc960 100644
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
+@@ -195,7 +195,11 @@ void start_worker() {
+   }
+   sWorkerThread = thread::Thread{{
+                                      .name = "Aurora FIFO processor",
++#if defined(__SWITCH__)
++                                     .affinity = thread::Affinity::Fifo,
++#else
+                                      .affinity = thread::Affinity::SharedCache,
++#endif
+                                  },
+                                  worker_main};
+ }
+diff --git a/lib/input.cpp b/lib/input.cpp
+index adb5c1f57..7fa852747 100644
+--- a/lib/input.cpp
++++ b/lib/input.cpp
+@@ -457,7 +457,18 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
+       controller.m_deadZones.emulateTriggers = false;
+     }
+     const auto props = SDL_GetGamepadProperties(ctrl);
++#ifdef __SWITCH__
++    // aleks2: SDL's Switch backend answers SDL_Unsupported() to every rumble
++    // call -- the function exists, it just declines -- so SDL advertises the
++    // capability and the property defaults to true anyway. Believing it sends
++    // every PADControlMotor down the SDL path, where nothing happens: the
++    // game's own vibration was silent while the companion's, which calls the
++    // driver directly, worked. The truth is that this controller has no rumble
++    // through SDL, and saying so lets the device path take over.
++    controller.m_hasRumble = false;
++#else
+     controller.m_hasRumble = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, true);
++#endif
+     controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
+     SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
+     g_GameControllers[instance] = controller;
+diff --git a/lib/thread.cpp b/lib/thread.cpp
+index 348b0ec45..811d1b1d6 100644
+--- a/lib/thread.cpp
++++ b/lib/thread.cpp
+@@ -8,6 +8,7 @@
+ #include <cstdint>
+ #include <fstream>
+ #include <mutex>
++#include <memory>
+ #include <optional>
+ #include <string>
+ #include <utility>
+@@ -16,6 +17,9 @@
+ #if defined(__linux__)
+ #include <pthread.h>
+ #include <sched.h>
++#elif defined(__SWITCH__)
++#include <pthread.h>
++#include <switch.h>
+ #elif defined(_WIN32)
+ #ifndef WIN32_LEAN_AND_MEAN
+ #define WIN32_LEAN_AND_MEAN
+@@ -234,6 +238,42 @@ std::optional<CacheDomain> find_cache_domain() { return std::nullopt; }
+ bool apply_cache_domain(const CacheDomain&) noexcept { return false; }
+ #endif
+ 
++#if defined(__SWITCH__)
++// Horizon gives an application cores 0, 1 and 2 and keeps core 3 for the system. Each
++// kind of thread gets a set of cores it may run on and the one it starts on:
++//
++//   Logic    cores 0-1, starts on 0   the game thread
++//   Fifo     core 1                   GX to WebGPU translation. The game thread
++//                                     blocks on this worker every frame, so
++//                                     whatever shares its core is taken out of
++//                                     the frame.
++//   Render   core 2                   only submits command buffers, mostly idle
++//   Compile  core 2                   shader compilation, at low priority so it
++//                                     fills the gaps on the render core. It must
++//                                     never share the FIFO core: a compile there
++//                                     would cost the frame twice, once for the
++//                                     compile and once for the translation it
++//                                     displaced.
++struct CorePlacement {
++  uint32_t allowed;  // bit n set: may run on core n
++  int32_t start;
++};
++
++std::optional<CorePlacement> switch_placement(Affinity affinity) noexcept {
++  switch (affinity) {
++  case Affinity::Logic:
++    return CorePlacement{0b011, 0};
++  case Affinity::Fifo:
++    return CorePlacement{0b010, 1};
++  case Affinity::Render:
++  case Affinity::Compile:
++    return CorePlacement{0b100, 2};
++  default:
++    return std::nullopt;
++  }
++}
++#endif
++
+ void pin_shared_cache() noexcept {
+   std::lock_guard lock{sDomainMutex};
+   if (!sDomainConfigured) {
+@@ -290,9 +330,60 @@ void set_current(const Options& options) noexcept {
+   }
+ 
+   SDL_SetCurrentThreadPriority(to_sdl_priority(options.priority));
++#if defined(__SWITCH__)
++  if (const auto placement = switch_placement(options.affinity)) {
++    // The kernel refuses a mask that reaches outside the cores this process owns.
++    // That is not fatal: an unpinned thread still runs, wherever it is put.
++    ::svcSetThreadCoreMask(::threadGetCurHandle(), placement->start, placement->allowed);
++  } else if (options.affinity == Affinity::SharedCache) {
++    pin_shared_cache();
++  }
++#else
+   if (options.affinity == Affinity::SharedCache) {
+     pin_shared_cache();
+   }
++#endif
+ }
+ 
++#if defined(__SWITCH__)
++struct LargeStackThread::Impl {
++  pthread_t handle{};
++  std::function<void()> body;
++};
++
++bool LargeStackThread::start(size_t stackBytes, std::function<void()> body) {
++  if (mImpl != nullptr) {
++    return false;
++  }
++  auto impl = std::make_unique<Impl>();
++  impl->body = std::move(body);
++
++  pthread_attr_t attributes;
++  pthread_attr_init(&attributes);
++  pthread_attr_setstacksize(&attributes, stackBytes);
++  const int created = pthread_create(
++      &impl->handle, &attributes,
++      [](void* self) -> void* {
++        static_cast<Impl*>(self)->body();
++        return nullptr;
++      },
++      impl.get());
++  pthread_attr_destroy(&attributes);
++  if (created != 0) {
++    return false;
++  }
++  mImpl = impl.release();
++  return true;
++}
++
++void LargeStackThread::join() noexcept {
++  if (mImpl == nullptr) {
++    return;
++  }
++  pthread_join(mImpl->handle, nullptr);
++  delete mImpl;
++  mImpl = nullptr;
++}
++#endif
++
+ } // namespace aurora::thread
+diff --git a/lib/thread.hpp b/lib/thread.hpp
+index 0c65cc1be..0b8a7f239 100644
+--- a/lib/thread.hpp
++++ b/lib/thread.hpp
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <concepts>
++#include <cstddef>
+ #include <functional>
+ #include <stop_token>
+ #include <string>
+@@ -11,7 +12,18 @@
+ namespace aurora::thread {
+ 
+ enum class Priority { Low, Normal, High };
+-enum class Affinity { None, SharedCache };
++enum class Affinity {
++  None,
++  SharedCache,
++  Logic,
++  Render,
++  // GX -> WebGPU translation. Its own core on Switch: the game thread blocks
++  // on this worker inside gfx::create_pass/resolve_pass, so whatever shares a
++  // core with it is taken straight out of the frame.
++  Fifo,
++  // Shader compilation (NAK). Deliberately NOT the Fifo core.
++  Compile,
++};
+ 
+ struct Options {
+   std::string name;
+@@ -22,6 +34,28 @@ struct Options {
+ // Applies thread options to the current thread
+ void set_current(const Options& options) noexcept;
+ 
++#if defined(__SWITCH__)
++// A thread whose stack size is chosen by the caller. std::thread cannot ask for one,
++// and the shader compiler Dawn runs on the pipeline thread needs far more stack than
++// libnx gives a thread by default.
++class LargeStackThread {
++public:
++  LargeStackThread() noexcept = default;
++  LargeStackThread(const LargeStackThread&) = delete;
++  LargeStackThread& operator=(const LargeStackThread&) = delete;
++  ~LargeStackThread() { join(); }
++
++  // False if the system could not create the thread.
++  bool start(size_t stackBytes, std::function<void()> body);
++  // Waits for the thread to finish; does nothing if there is none.
++  void join() noexcept;
++
++private:
++  struct Impl;
++  Impl* mImpl = nullptr;
++};
++#endif
++
+ class Thread {
+ public:
+   Thread() noexcept = default;
+diff --git a/lib/window.cpp b/lib/window.cpp
+index 63774af8b..bd994b1f7 100644
+--- a/lib/window.cpp
++++ b/lib/window.cpp
+@@ -21,6 +21,9 @@
+ #include <SDL3/SDL_stdinc.h>
+ #include <SDL3/SDL_pixels.h>
+ #include <tracy/Tracy.hpp>
++#if defined(__SWITCH__)
++#include <switch.h>
++#endif
+ 
+ #if defined(SDL_PLATFORM_ANDROID)
+ #include <jni.h>
+@@ -34,6 +37,9 @@ extern "C" void Android_UnlockActivityMutex(void);
+ #include <condition_variable>
+ #include <deque>
+ #include <mutex>
++#include <cmath>
++#include <utility>
++#include <tuple>
+ #include <string>
+ #include <vector>
+ 
+@@ -480,6 +486,25 @@ void shutdown() {
+   SDL_Quit();
+ }
+ 
++#if defined(__SWITCH__)
++// mp2-nx (from Alek's Switch layer): SDL's Horizon backend reports the size it was created with even after
++// the console is docked. The panel is 1280x720 and the dock outputs 1920x1080; the applet knows which.
++static void switch_native_size(int& w, int& h) {
++  const bool docked = appletGetOperationMode() == AppletOperationMode_Console;
++  w = docked ? 1920 : 1280;
++  h = docked ? 1080 : 720;
++}
++// Never render past what the current mode can show, scaled proportionally.
++static void switch_clamp(int& fb_w, int& fb_h, int native_w, int native_h) {
++  if (fb_w <= native_w && fb_h <= native_h) {
++    return;
++  }
++  const double k = std::min(static_cast<double>(native_w) / fb_w, static_cast<double>(native_h) / fb_h);
++  fb_w = std::max(1, static_cast<int>(fb_w * k));
++  fb_h = std::max(1, static_cast<int>(fb_h * k));
++}
++#endif
++
+ namespace {
+ // The frame buffer size a render scale gives for a window of native_fb_w x native_fb_h pixels.
+ Vec2<int> frame_buffer_size_for_scale(int native_fb_w, int native_fb_h, float frameBufferScale) {
+@@ -513,7 +538,13 @@ bool get_frame_buffer_size_for_scale(float scale, uint32_t* width, uint32_t* hei
+       native_fb_h <= 0) {
+     return false;
+   }
+-  const auto [fb_w, fb_h] = frame_buffer_size_for_scale(native_fb_w, native_fb_h, scale);
++#if defined(__SWITCH__)
++  switch_native_size(native_fb_w, native_fb_h);
++#endif
++  auto [fb_w, fb_h] = frame_buffer_size_for_scale(native_fb_w, native_fb_h, scale);
++#if defined(__SWITCH__)
++  switch_clamp(fb_w, fb_h, native_fb_w, native_fb_h);
++#endif
+   *width = static_cast<uint32_t>(fb_w);
+   *height = static_cast<uint32_t>(fb_h);
+   return true;
+@@ -527,8 +558,14 @@ AuroraWindowSize get_window_size() {
+   AURORA_ASSERT(SDL_GetWindowSize(g_window, &width, &height), "Failed to get window size: {}", SDL_GetError());
+   AURORA_ASSERT(SDL_GetWindowSizeInPixels(g_window, &native_fb_w, &native_fb_h), "Failed to get window size in pixels: {}",
+          SDL_GetError());
++#if defined(__SWITCH__)
++  switch_native_size(native_fb_w, native_fb_h);
++#endif
+ 
+-  const auto [fb_w, fb_h] = frame_buffer_size_for_scale(native_fb_w, native_fb_h, g_frameBufferScale);
++  auto [fb_w, fb_h] = frame_buffer_size_for_scale(native_fb_w, native_fb_h, g_frameBufferScale);
++#if defined(__SWITCH__)
++  switch_clamp(fb_w, fb_h, native_fb_w, native_fb_h);
++#endif
+ 
+   const float scale = SDL_GetWindowDisplayScale(g_window);
+   return {
