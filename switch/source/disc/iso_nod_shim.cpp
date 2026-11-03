@@ -300,7 +300,7 @@ NodResult nod_disc_open_stream(const NodDiscStream* stream, const NodDiscOptions
     if (dusk::sw::disc::is_wii_disc(*disc->container)) {
         dusk::sw::disc::WiiKeys keys;
 #ifdef __SWITCH__
-        const std::string keyDir = "sdmc:/switch/dusklight";
+        const std::string keyDir = "sdmc:/switch/mp2-nx";  // mp2-nx: the app folder
 #else
         const char* env = std::getenv("DUSK_WII_KEY_DIR");
         const std::string keyDir = env != nullptr ? env : ".";
@@ -364,6 +364,12 @@ NodResult nod_disc_open_partition_kind(NodHandle* disc, uint32_t kind, const Nod
     handle->disc = disc->disc;
     *out = handle;
     return NOD_RESULT_OK;
+}
+
+// mp2-nx: Echoes' Aurora asks this (dvd.cpp, aurora_dvd_base_offset); the shim had no definition.
+bool nod_partition_is_wii(const NodHandle* partition) {
+    return partition != nullptr && partition->kind == HandleKind::Partition && partition->disc != nullptr &&
+           partition->disc->wii;
 }
 
 NodResult nod_partition_meta(const NodHandle* partition, NodPartitionMeta* out) {

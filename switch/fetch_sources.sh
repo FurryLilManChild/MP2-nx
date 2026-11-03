@@ -31,6 +31,9 @@ gitpin tracy    https://github.com/wolfpld/tracy refs/tags/v0.14.1
 fetchx freetype https://files.twilitrealm.dev/freetype-2.14.3.tar.gz
 fetchx sqlite3  https://sqlite.org/2026/sqlite-amalgamation-3510300.zip
 fetchx zstd     https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+if [ ! -e tracy/.mp2nx-patched ]; then
+  git -C tracy apply "$(dirname "${BASH_SOURCE[0]}")/patches/tracy-horizon.patch" && touch tracy/.mp2nx-patched
+fi
 # Dawn: its third-party sources and the two Switch patches from Alek's port.
 if [ ! -e dawn/.mp2nx-patched ]; then
   (cd dawn && python3 tools/fetch_dawn_dependencies.py)

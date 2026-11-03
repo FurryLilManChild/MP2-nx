@@ -26,7 +26,14 @@ if [ ! -f "$PREFIX/lib/libwebgpu_dawn.a" ]; then
     -DDAWN_FETCH_DEPENDENCIES=OFF -DTINT_BUILD_TESTS=OFF -DTINT_BUILD_CMD_TOOLS=OFF -DTINT_BUILD_IR_BINARY=OFF \
     -DTINT_BUILD_GLSL_WRITER=OFF -DTINT_BUILD_HLSL_WRITER=OFF -DTINT_BUILD_MSL_WRITER=OFF -DABSL_PROPAGATE_CXX_STD=ON
   ninja -C "$OUT/build-dawn" -j"$JOBS" webgpu_dawn
-  ninja -C "$OUT/build-dawn" install
+  # Dawn's install step builds every target (some do not build for Horizon); only the monolithic
+  # library and the headers are needed. The library is stripped of debug info: 1.7 GB to 40 MB.
+  mkdir -p "$PREFIX/lib/cmake/Dawn" "$PREFIX/include"
+  /opt/devkitpro/devkitA64/bin/aarch64-none-elf-strip --strip-debug \
+    -o "$PREFIX/lib/libwebgpu_dawn.a" "$OUT/build-dawn/src/dawn/native/libwebgpu_dawn.a"
+  cp -r "$DAWN_SRC/include/." "$PREFIX/include/"
+  cp -r "$OUT/build-dawn/gen/include/." "$PREFIX/include/"
+  cp "$REPO/switch/cmake/DawnConfig.cmake" "$PREFIX/lib/cmake/Dawn/DawnConfig.cmake"
 fi
 
 if [ ! -f "$PREFIX/lib/libSDL3.a" ]; then

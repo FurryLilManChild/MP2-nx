@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..a77862d12 100644
+index ef1c8c60d..7d0fc279c 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..a77862d12 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,23 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,29 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -22,9 +22,15 @@ index ef1c8c60d..a77862d12 100644
 +# dependencies are decided by switch/cmake/mp2_switch_deps.cmake, injected ahead of this
 +# file; here the Horizon start-up, the low-address REL arena and the NRO are added.
 +if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
++    # The POSIX crash reporter is replaced by a Horizon one with the same API.
++    get_target_property(_mp2nx_audio_sources mp_port_audio SOURCES)
++    list(REMOVE_ITEM _mp2nx_audio_sources platform/port_crash.cpp)
++    set_property(TARGET mp_port_audio PROPERTY SOURCES ${_mp2nx_audio_sources})
++    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/platform/port_crash_switch.cpp)
 +    target_sources(metroid_prime2_port PRIVATE
 +        ${MP2NX_ROOT}/switch/source/platform/startup.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp
++        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
@@ -38,10 +44,21 @@ index ef1c8c60d..a77862d12 100644
 +    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
 +endif()
 diff --git a/platform/rel.cpp b/platform/rel.cpp
-index f4ff077ce..d81a034e8 100644
+index f4ff077ce..298a34ddb 100644
 --- a/platform/rel.cpp
 +++ b/platform/rel.cpp
-@@ -380,6 +380,11 @@ static uintptr_t FindArenaGapBelow4GiB(size_t size) {
+@@ -7,8 +7,10 @@
+ #if defined(_WIN32)
+ #include <windows.h>
+ #else
++#if !defined(__SWITCH__)
+ #include <sys/mman.h>
+ #endif
++#endif
+ 
+ namespace port {
+ namespace rel {
+@@ -380,6 +382,11 @@ static uintptr_t FindArenaGapBelow4GiB(size_t size) {
  }
  #endif
  
@@ -53,7 +70,7 @@ index f4ff077ce..d81a034e8 100644
  GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
    if (size == 0) {
      return;
-@@ -389,7 +394,10 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
+@@ -389,7 +396,10 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
    // say why it failed without changing what any other path prints.
    bool portableFallback = false;
  
@@ -65,7 +82,7 @@ index f4ff077ce..d81a034e8 100644
    void* base = preferredBase != 0
                     ? VirtualAlloc(reinterpret_cast<void*>(static_cast<uintptr_t>(preferredBase)), size,
                                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
-@@ -456,7 +464,11 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
+@@ -456,7 +466,11 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
                     "metroid_prime2_port: no REL arena: could not map %zu bytes below 4 GiB (%s)\n",
                     size, base == nullptr ? "no addressable low mapping" : "the mapping landed too high");
      }
@@ -78,7 +95,7 @@ index f4ff077ce..d81a034e8 100644
      if (base != nullptr) {
        VirtualFree(base, 0, MEM_RELEASE);
      }
-@@ -476,7 +488,9 @@ GuestArena::~GuestArena() {
+@@ -476,7 +490,9 @@ GuestArena::~GuestArena() {
    if (m_base == nullptr) {
      return;
    }
