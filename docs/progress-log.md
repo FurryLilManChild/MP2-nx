@@ -2,9 +2,10 @@
 
 Newest first.
 
-## 2026-11-04: deko-12 (diagnostics) and prep while the owner was away
+## 2026-11-04: deko-12 (diagnostics) and prep while the owner was away; deko-13 = both
 
-- deko-12 (built, not yet tested): the owner's photos from deko-11 show whole surfaces flat white or black (far walls in
+- deko-13 (built 17:37, not yet tested) is deko-12 plus the Null buffer fix below; deko-12 itself was never run.
+- deko-12 (built, not run): the owner's photos from deko-11 show whole surfaces flat white or black (far walls in
   an elevator shaft, pipe rings, plant tips, cave patches) while nearby surfaces of the same kind are right. The log
   has no errors for them. deko-12 logs every texture sampled before anything wrote it ("diag: ... is sampled before
   anything wrote it") and every upload or copy the bridge drops, and adds deko3d_env.txt switches MP2DK_MIP0,
