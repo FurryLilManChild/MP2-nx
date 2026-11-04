@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-04: deko3d phase 0 result (console)
+
+The owner ran mp2-nx-deko with the smoke test on (logs in C:\MP2-nx\out\sd\switch\dekologs). It booted and played
+normally; the test passed: a deko3d device and queue next to Dawn/NVK in 6.9 ms, the test shader, and 80 of 80 GX
+shader stages (the first 40 shaders) through Tint GLSL and uam, all loaded as DKSH. No errors, no crash.
+- Per shader: Tint GLSL 61 ms, uam 406 ms on average; vertex stages 117 to 1,256 ms in uam (most 500 to 1,200),
+  fragment stages 4 to 183 ms. Worst vertex plus fragment 1,360 ms. Whole test 37.6 s.
+- The same start's Vulkan prewarm: 1,000 pipelines in 76.8 s (about 77 ms each), single compiles 200 to 340 ms.
+  The test ran on core 2 next to that prewarm, so its times are inflated, but uam (GLSL frontend, TGSI, nv50_ir)
+  is still several times slower than NVK's compiler, mostly in vertex shaders.
+- Consequence: on-console compiles cannot carry deko3d; the offline DKSH cache (plan phase 3) is what makes it
+  work, and should come with the first drawing build rather than after it.
+
 ## 2026-11-04: deko3d phase 0 (plumbing and smoke test)
 
 - Tint's GLSL writer built with Dawn (TINT_BUILD_GLSL_WRITER=ON; the GLSL validator off, it would pull in
