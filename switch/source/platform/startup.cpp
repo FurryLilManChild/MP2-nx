@@ -18,14 +18,8 @@
 
 #define MP2NX_DIR "sdmc:/switch/mp2-nx"
 
-// SQLite (the pipeline and Dawn caches): its default unix VFS takes fcntl locks, which
-// libnx does not have. "unix-none" is the same VFS without locking; only this process
-// ever opens these files.
-extern "C" {
-struct sqlite3_vfs;
-sqlite3_vfs* sqlite3_vfs_find(const char* name);
-int sqlite3_vfs_register(sqlite3_vfs* vfs, int makeDefault);
-}
+// SQLite for the pipeline and Dawn caches on Horizon (sqlite_switch.cpp).
+extern "C" void mp2nx_sqlite_setup(void);
 
 extern "C" {
 
@@ -120,9 +114,7 @@ extern "C" void userAppInit(void) {
         "  from the HOME menu, then pick mp2-nx. Not from the Album.");
   }
 
-  if (sqlite3_vfs* vfs = sqlite3_vfs_find("unix-none")) {
-    sqlite3_vfs_register(vfs, 1);
-  }
+  mp2nx_sqlite_setup();
 
   mkdir(MP2NX_DIR "/user", 0777);
   mkdir(MP2NX_DIR "/cache", 0777);

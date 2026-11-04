@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-03: switch-test2 result, test3 prepared
+
+- Booted to gameplay on hardware: Vulkan on NVK, the REL arena below 4 GiB, the .rvz reader and input all work. The owner:
+  smooth at stock clocks. Problems: assets pop in the first time they are drawn (arm cannon, a wall, the whole room on
+  first morph ball, the scan visor), fine the second time; the game reports the memory card as corrupted.
+- Pop-in cause (mp2-nx.log): both caches fail to open, `Cache database sdmc:/switch/mp2-nx/cache/dawn_cache.db failed
+  its check: unable to open database file` (same for pipeline_cache.db). SQLite treats a path without a leading '/' as
+  relative and prepends getcwd() to "sdmc:/...". With no caches every pipeline compiles live on the one compile
+  thread (200 to 340 ms each) and Aurora skips draws until it is ready (1,917 skipped draws in one context).
+- Fix: `switch/source/platform/sqlite_switch.cpp`, adapted from aurora-aleks-nx (MIT): a copy of SQLite's unix-none
+  VFS whose xFullPathname passes mount-qualified paths through, made the default, plus syscall shims for libnx file
+  semantics (reads past the end clamp to 0 instead of EIO, writes past the end zero-fill the gap, stat of an open file
+  reports a plain file). Expected: the second visit to anything is smooth across launches. First-time pop-in stays
+  until a starter cache ships (option: seed from the PC build's pipeline_cache.db).
+- Memory card cause: `[aurora::card] No file to open: MetroidPrime2`, then `Failed to write 8192 bytes to card`.
+  `AtomicFileWriter::commit()` renames the temp file over the existing one, which FAT refuses. Fix in Aurora io.cpp
+  (Switch only): move the old file to `.prev`, rename the temp into place (restore `.prev` on failure), remove `.prev`.
+- Noted for later (the owner): the F1 overlay menu needs a controller and handheld overhaul. Also seen: two small textures
+  (320x224, 320x184) re-uploaded every frame (same on PC), and scan_peek "all 40x64 pixels are zero" lines (unverified).
+
 ## 2026-11-03: switch-test1 result
 
 - Boot reached Echoes' settings and folder setup (takeover check passed, 3189 MiB, the .rvz found, MP2_* paths used),
