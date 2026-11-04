@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-03 (overnight): test6, Alek's fixes
+
+Built clean (NRO sha256 ce2ac6e2...; in `C:\MP2-nx\out\test6\` so test5 stays on the owner's SD folder). From the two
+audits (aurora-aleks MIT, Dusklight CC0):
+- Exit: `__nx_applet_exit_mode` 1 in userAppExit, our `__libnx_exit`, and `mp2nx_end_process` (ISelfController::Exit,
+  then the kernel after 10 s) for the terminate path. Always back to HOME: the REL arena's code mappings and live
+  threads would crash hbloader.
+- Load boost (`switch/source/platform/load_boost.cpp`, Aurora `aurora_shader_set_compile_boost`): the compile thread
+  may use core 0 at priority 0x2C on the title (startup warmup), the CMFGameLoader screen and world transitions;
+  CMFGameLoader also sets CPU boost FastLoad. Hooks in src/MetroidPrime/CMFGameLoader.cpp and CWorldTransManager.cpp
+  (echoes-switch.patch now covers src/).
+- Caches: quick_check only when `<db>.open` survived an unclean exit, never for dawn_cache.db; journal TRUNCATE on
+  Switch; Dawn cache_shutdown under the cache lock and marked broken; no Dawn prune or VACUUM on Switch.
+- Memory: port_memory_log reads the heap through mallinfo and libnx's fake_heap bounds; the pipeline trim runs on
+  Switch with precompiling kept (512 / 256 MiB free).
+- Logs fully buffered and flushed every 200 ms by a thread once the menu draws; `--wrap=abort` (log caller, then a
+  panic break for an Atmosphere report); `--wrap=fchmod` returns 0; SDL_AUDIO_DEVICE_SAMPLE_FRAMES 4096; texture
+  replacement 1024 max and 640 MB on Switch; NRO icon (`switch/res/icon.jpg`, original text art).
+- First compile failed: `switch.h` was included inside the glibc block of pipeline_cache.cpp. Fixed.
+
 ## 2026-11-03: switch-test4 result, test5 (button remapping)
 
 - Test4: the caches persist (`271 pipelines ready 35702 ms after startup`, from test3's list); 64 new pipelines in

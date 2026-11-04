@@ -28,7 +28,33 @@ u32 __nx_applet_type = AppletType_Application;
 // 0: libnx gives the heap everything the system leaves over.
 size_t __nx_heap_size = 0;
 
+// libnx's (weak, not in its headers). 1 makes its applet teardown end an application the way AM
+// expects (ISelfController::Exit, then wait to be ended). Set only in userAppExit. Adapted from
+// Alek's Dusklight switch_startup.cpp (V1-rc12, CC0): a bare svcExitProcess makes HOME show
+// "The software was closed", and returning to hbloader with threads alive or code memory
+// remapped (our REL arena, low_arena.cpp) crashed the loader (2001-0106) on his console.
+u32 __nx_applet_exit_mode = 0;
+
 }  // extern "C"
+
+// Ends the process through AM (ISelfController::Exit); the kernel ends it if AM has not within 10 s.
+extern "C" [[noreturn]] void mp2nx_end_process(void) {
+  const AppletType type = appletGetAppletType();
+  if (type == AppletType_Application || type == AppletType_SystemApplication) {
+    Service* self = appletGetServiceSession_SelfController();
+    if (self != nullptr && serviceIsActive(self) && R_SUCCEEDED(serviceDispatch(self, 0))) {
+      for (int i = 0; i < 100; ++i) {
+        svcSleepThread(100'000'000LL);
+      }
+    }
+  }
+  svcExitProcess();
+  __builtin_unreachable();
+}
+
+namespace {
+LoaderReturnFn sLoaderReturn = nullptr;
+}
 
 namespace {
 
@@ -115,6 +141,9 @@ extern "C" void userAppInit(void) {
   }
 
   mp2nx_sqlite_setup();
+  // The console's audio renderer crackles at SDL's default buffer size (Dusklight
+  // DuskAudioSystem.cpp:92); SDL reads its hints from the environment too.
+  setenv("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "4096", 0);
 
   mkdir(MP2NX_DIR "/user", 0777);
   mkdir(MP2NX_DIR "/cache", 0777);
@@ -136,10 +165,29 @@ extern "C" void userAppInit(void) {
 }
 
 extern "C" void userAppExit(void) {
+  // Always back to HOME: the REL arena's code-memory mappings and any thread Echoes, Dawn or
+  // Aurora left running would crash hbloader on a return to it.
+  std::fprintf(stderr, "mp2-nx: exit: ending the process through AM (back to HOME)\n");
   std::fflush(stdout);
   std::fflush(stderr);
   nvExit();
   romfsExit();
+  sLoaderReturn = envGetExitFuncPtr();
+  __nx_applet_exit_mode = 1;
+}
+
+// libnx's own is weak: the same steps. With __nx_applet_exit_mode 1, appletExit (in __appExit)
+// points the exit function at libnx's _appletExitProcess (ISelfController::Exit). If the applet
+// teardown did not run, the exit function is still the loader's: end the process ourselves.
+extern "C" void __appExit(void);
+extern "C" void NX_NORETURN __nx_exit(Result rc, LoaderReturnFn retaddr);
+extern "C" void NX_NORETURN __libnx_exit(int rc) {
+  (void)rc;
+  __appExit();
+  if (envGetExitFuncPtr() == sLoaderReturn) {
+    svcExitProcess();
+  }
+  __nx_exit(0, envGetExitFuncPtr());
 }
 
 // ---------------------------------------------------------------------------------

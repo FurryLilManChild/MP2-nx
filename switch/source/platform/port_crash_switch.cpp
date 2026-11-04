@@ -19,6 +19,8 @@
 extern "C" char __start__;  // libnx: the start of the program image
 
 namespace PortCrash {
+extern "C" [[noreturn]] void mp2nx_end_process(void);
+
 namespace {
 void (*sAfterReport)(int, const void*) = nullptr;
 
@@ -62,7 +64,7 @@ void log_stack() {
   if (sAfterReport != nullptr) {
     sAfterReport(0, nullptr);
   }
-  svcExitProcess();
+  mp2nx_end_process(); // startup.cpp: through AM, so HOME does not report a vanished program
   __builtin_unreachable();
 }
 }  // namespace

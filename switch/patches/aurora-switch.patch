@@ -1,3 +1,17 @@
+diff --git a/include/aurora/gfx.h b/include/aurora/gfx.h
+index e640c6221..da641f71d 100644
+--- a/include/aurora/gfx.h
++++ b/include/aurora/gfx.h
+@@ -69,6 +69,9 @@ uint64_t aurora_pipeline_set_context(uint64_t context);
+ // Any thread: queue background builds of the pipelines `context` used before, plus those shared by
+ // several areas. Lazy pipeline cache only; a context prefetched in the last 600 frames is skipped.
+ void aurora_pipeline_prefetch(uint64_t context);
++// mp2-nx: nonzero lets the compile thread also run on core 0 at the game's priority (a loading
++// screen); 0 puts it back on its own core. Applied before its next pipeline. Switch only.
++void aurora_shader_set_compile_boost(uint32_t on);
+ typedef struct {
+   uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
+   uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
 diff --git a/lib/card/CardGciFolder.cpp b/lib/card/CardGciFolder.cpp
 index 06973d1dd..ceb3c85e5 100644
 --- a/lib/card/CardGciFolder.cpp
@@ -102,7 +116,7 @@ index de8c3f93c..f02a1d834 100644
  const wgpu::Buffer& staging_buffer(size_t slot);
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index dfbba6023..0d9a1ce86 100644
+index dfbba6023..ce9cdac28 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
@@ -111,7 +125,17 @@ index dfbba6023..0d9a1ce86 100644
  
  #include "clear.hpp"
  #include "fx_pipelines.hpp"
-@@ -85,6 +86,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+@@ -32,6 +33,9 @@
+ #if defined(__GLIBC__) || defined(__ANDROID__)
+ #include <malloc.h>
+ #endif
++#ifdef __SWITCH__
++#include <switch.h>
++#endif
+ #include <absl/container/flat_hash_map.h>
+ #include <absl/container/flat_hash_set.h>
+ #include <fmt/format.h>
+@@ -85,6 +89,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
  constexpr size_t BuildPipelinesPerFrame = 1;
  #endif
  static std::vector<std::thread> g_pipelineThreads;
@@ -122,7 +146,86 @@ index dfbba6023..0d9a1ce86 100644
  static std::atomic_bool g_pipelineThreadEnd = false;
  static std::condition_variable g_pipelineQueueCv;
  static std::condition_variable g_pipelineReadyCv;
-@@ -1724,10 +1729,29 @@ void initialize_pipeline_cache() {
+@@ -512,7 +520,12 @@ static void notify_pipeline_ready(bool queued) {
+                                                                    g_pipelineLoadStart)
+                  .count());
+     // Prune GPU cache entries after fully loading the pipeline cache.
++#if !defined(__SWITCH__)
++    // mp2-nx (after aurora-aleks pipeline_cache.cpp:1736): never on the Switch, where the prune
++    // deleted most of the cache and then ran a VACUUM of the whole file on the SD card while
++    // holding the cache lock.
+     webgpu::cache_prune();
++#endif
+   }
+   g_pipelineReadyCv.notify_all();
+ }
+@@ -772,6 +785,7 @@ static void pipeline_cache_abort() {
+   if (g_pipelineCacheDb != nullptr) {
+     sqlite3_close(g_pipelineCacheDb);
+     g_pipelineCacheDb = nullptr;
++    sqlite::mark_cache_closed(pipeline_cache_path());
+   }
+   if (g_pipelineCacheCorrupt.exchange(false)) {
+     Log.warn("Pipeline cache is damaged; deleting it");
+@@ -971,7 +985,7 @@ static bool prepare_pipeline_cache_db() {
+     return false;
+   }
+ 
+-  ret = sqlite::exec(g_pipelineCacheDb, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++  ret = sqlite::exec(g_pipelineCacheDb, sqlite::cache_journal_pragmas());
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
+     pipeline_cache_abort();
+@@ -1306,6 +1320,38 @@ static void pipeline_cache_writer() {
+   }
+ }
+ 
++// mp2-nx (from aurora-aleks pipeline_cache.cpp:1099, V1-rc9): while a loading screen waits (the game
++// thread mostly idle), the compile thread may also run on core 0 at the game's priority; otherwise
++// it stays on its own core at low priority. Alek's console numbers: 70-136 ms per cached pipeline
++// during gameplay against ~21 ms at boot, the thread starved rather than the cache cold. The worker
++// applies a change itself, before its next pipeline.
++static std::atomic<uint32_t> g_compileBoost{0};
++static void apply_compile_boost() {
++#ifdef __SWITCH__
++  static uint32_t applied = 0;
++  static s32 savedPriority = -1;
++  const uint32_t want = g_compileBoost.load(std::memory_order_relaxed);
++  if (want == applied) {
++    return;
++  }
++  applied = want;
++  const Handle self = ::threadGetCurHandle();
++  if (want != 0) {
++    s32 prio = 0;
++    if (R_SUCCEEDED(::svcGetThreadPriority(&prio, self))) {
++      savedPriority = prio;
++    }
++    ::svcSetThreadCoreMask(self, 2, 0b101);
++    ::svcSetThreadPriority(self, 0x2C);
++  } else {
++    ::svcSetThreadCoreMask(self, 2, 0b100);
++    if (savedPriority >= 0) {
++      ::svcSetThreadPriority(self, static_cast<u32>(savedPriority));
++    }
++  }
++#endif
++}
++
+ static void pipeline_worker() {
+ #ifdef TRACY_ENABLE
+   tracy::SetThreadName("Pipeline compilation thread");
+@@ -1331,6 +1377,9 @@ static void pipeline_worker() {
+       pending = std::move(source.front());
+       source.pop_front();
+     }
++    if (g_hasPipelineThread) {
++      apply_compile_boost();
++    }
+     auto result = create_pipeline_timed(pending.hash, std::move(pending.create));
+     {
+       std::lock_guard lock{g_pipelineMutex};
+@@ -1724,10 +1773,29 @@ void initialize_pipeline_cache() {
      g_hasPipelineThread = false;
    } else {
      g_hasPipelineThread = true;
@@ -152,7 +255,7 @@ index dfbba6023..0d9a1ce86 100644
      Log.info("pipeline cache: {} compile thread(s)", threads);
    }
  
-@@ -1750,6 +1774,12 @@ void shutdown_pipeline_cache() {
+@@ -1750,6 +1818,12 @@ void shutdown_pipeline_cache() {
        thread.join();
      }
      g_pipelineThreads.clear();
@@ -165,6 +268,16 @@ index dfbba6023..0d9a1ce86 100644
    }
    g_hasPipelineThread = false;
  
+@@ -1943,3 +2017,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+   stats->pending = static_cast<uint32_t>(g_pendingPipelines.size());
+ }
+ }
++
++void aurora_shader_set_compile_boost(uint32_t on) {
++  aurora::gfx::g_compileBoost.store(on != 0 ? 1u : 0u, std::memory_order_relaxed);
++  // Wake the worker so the change applies before it sleeps on an empty queue.
++  aurora::gfx::g_pipelineQueueCv.notify_all();
++}
 diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
 index 85783b60e..cbab58ad8 100644
 --- a/lib/gfx/render_worker.cpp
@@ -183,6 +296,22 @@ index 85783b60e..cbab58ad8 100644
                              },
                              worker_main};
  }
+diff --git a/lib/gfx/texture_replacement.cpp b/lib/gfx/texture_replacement.cpp
+index d918ce109..f4f634b88 100644
+--- a/lib/gfx/texture_replacement.cpp
++++ b/lib/gfx/texture_replacement.cpp
+@@ -51,6 +51,11 @@ constexpr Module Log{"aurora::texture"};
+ #ifdef __ANDROID__
+ constexpr uint32_t kDefaultReplacementMaxDim = 1024;
+ constexpr uint64_t kDefaultReplacementCacheMB = 1024;
++#elif defined(__SWITCH__)
++// mp2-nx (after aurora-aleks texture_replacement.cpp:47, V1-rc8): about 3 GB for the whole process,
++// shared with the GPU; at 4 GB a large pack would never be evicted before memory ran out.
++constexpr uint32_t kDefaultReplacementMaxDim = 1024;
++constexpr uint64_t kDefaultReplacementCacheMB = 640;
+ #else
+ constexpr uint32_t kDefaultReplacementMaxDim = 0;
+ constexpr uint64_t kDefaultReplacementCacheMB = 4096;
 diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
 index efddaaf2a..f667bc960 100644
 --- a/lib/gx/fifo.cpp
@@ -222,6 +351,86 @@ index adb5c1f57..7fa852747 100644
      controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
      SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
      g_GameControllers[instance] = controller;
+diff --git a/lib/sqlite_utils.hpp b/lib/sqlite_utils.hpp
+index 94a5a463e..9dd7638b5 100644
+--- a/lib/sqlite_utils.hpp
++++ b/lib/sqlite_utils.hpp
+@@ -3,6 +3,7 @@
+ #include "internal.hpp"
+ #include "io.hpp"
+ 
++#include <cstdio>
+ #include <filesystem>
+ #include <string>
+ #include <system_error>
+@@ -51,10 +52,58 @@ inline void delete_db_files(const std::string& file, Module& log) {
+ // it damaged. A cache can always be rebuilt; a damaged one must never be fed to the
+ // GPU. Other failures (locked, unwritable) leave the files alone. Returns SQLITE_OK
+ // with *db open, or an error code with *db closed.
+-inline int open_cache_db(const std::string& file, sqlite3** db, Module& log) {
++// mp2-nx (after aurora-aleks sqlite_cache_open.hpp CheckPolicy): on the Switch a quick_check reads
++// the whole file from the SD card (Alek measured 18.5 s for a 75 MB Dawn cache) on every start.
++// There it runs only when `<db>.open` is still there from a run that did not close the cache
++// (a crash or power loss), and never for `checkPolicy` false (the Dawn cache, as Alek's).
++// The marker is written after the open and removed by mark_cache_closed.
++inline bool cache_check_needed(const std::string& file, bool checkPolicy) {
++#if defined(__SWITCH__)
++  if (!checkPolicy) {
++    return false;
++  }
++  std::error_code ec;
++  return std::filesystem::exists(io::fs_path_from_string(file + ".open"), ec);
++#else
++  (void)file;
++  (void)checkPolicy;
++  return true;
++#endif
++}
++inline void mark_cache_open(const std::string& file) {
++#if defined(__SWITCH__)
++  if (FILE* f = std::fopen((file + ".open").c_str(), "w")) {
++    std::fclose(f);
++  }
++#else
++  (void)file;
++#endif
++}
++inline void mark_cache_closed(const std::string& file) {
++#if defined(__SWITCH__)
++  std::remove((file + ".open").c_str());
++#else
++  (void)file;
++#endif
++}
++// The journal mode for a cache: WAL is compiled out on the Switch (SQLITE_OMIT_WAL), where the
++// fallback DELETE creates and deletes a journal file on every commit; TRUNCATE keeps it.
++inline const char* cache_journal_pragmas() {
++#if defined(__SWITCH__)
++  return "PRAGMA journal_mode=TRUNCATE; PRAGMA synchronous=NORMAL;";
++#else
++  return "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;";
++#endif
++}
++
++inline int open_cache_db(const std::string& file, sqlite3** db, Module& log, bool checkPolicy = true) {
+   for (int attempt = 0;; ++attempt) {
+     int ret = sqlite3_open(file.c_str(), db);
+     bool damaged = false;
++    if (ret == SQLITE_OK && !cache_check_needed(file, checkPolicy) && attempt == 0) {
++      mark_cache_open(file);
++      return SQLITE_OK;
++    }
+     if (ret == SQLITE_OK) {
+       bool ok = false;
+       ret = exec(*db, "PRAGMA quick_check;", [&ok](int argc, char** argv, char**) {
+@@ -62,6 +111,7 @@ inline int open_cache_db(const std::string& file, sqlite3** db, Module& log) {
+         return ok ? 0 : 1;
+       });
+       if (ret == SQLITE_OK && ok) {
++        mark_cache_open(file);
+         return SQLITE_OK;
+       }
+       // SQLITE_ABORT: the callback stopped on a row that wasn't "ok".
 diff --git a/lib/thread.cpp b/lib/thread.cpp
 index 348b0ec45..811d1b1d6 100644
 --- a/lib/thread.cpp
@@ -409,6 +618,48 @@ index 0c65cc1be..0b8a7f239 100644
  class Thread {
  public:
    Thread() noexcept = default;
+diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
+index d64d2c2f2..d33bc9521 100644
+--- a/lib/webgpu/gpu_cache.cpp
++++ b/lib/webgpu/gpu_cache.cpp
+@@ -132,14 +132,15 @@ static bool cache_init_core() {
+ 
+   std::string file = io::fs_path_to_string(cache_path());
+   Log.debug("Using dawn cache at {}", file);
+-  auto ret = sqlite::open_cache_db(file, &db, Log);
++  // mp2-nx: never quick_check the Dawn cache on the Switch (sqlite_utils.hpp cache_check_needed).
++  auto ret = sqlite::open_cache_db(file, &db, Log, /*checkPolicy=*/false);
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to open database {}", file);
+     return false;
+   }
+ 
+   // WAL mode + NORMAL = no need for disk syncs, consistent but not durable is fine.
+-  ret = sqlite::exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
++  ret = sqlite::exec(db, sqlite::cache_journal_pragmas());
+   if (ret != SQLITE_OK) {
+     Log.error("Failed to set pragmas: {}", sqlite3_errmsg(db));
+     return false;
+@@ -467,6 +468,11 @@ void cache_prune() {
+ }
+ 
+ void cache_shutdown() {
++  // mp2-nx (after aurora-aleks gpu_cache.cpp:885): Dawn's workers may still be inside a load or a
++  // store; closing the database under them is a use-after-close. Take the lock, and mark the
++  // cache broken so a late store cannot open it again.
++  std::lock_guard lock(cache_mutex);
++  cache_broken = true;
+ #if defined(AURORA_CACHE_USE_ZSTD)
+   compress_buffer.clear();
+ #endif
+@@ -486,6 +492,7 @@ void cache_shutdown() {
+   if (db != nullptr) {
+     check(sqlite3_close(db));
+     db = nullptr;
++    sqlite::mark_cache_closed(io::fs_path_to_string(cache_path()));
+   }
+ }
+ 
 diff --git a/lib/window.cpp b/lib/window.cpp
 index 63774af8b..bd994b1f7 100644
 --- a/lib/window.cpp

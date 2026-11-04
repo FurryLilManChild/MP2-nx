@@ -28,6 +28,9 @@
 #include <string>
 #include <vector>
 
+extern "C" void mp2nx_load_boost(int reason, int on);
+extern "C" void mp2nx_start_log_flusher(void);
+
 namespace PortDebug::SwitchMenu {
 namespace {
 
@@ -724,6 +727,8 @@ void DrawAlways() {
   }
   if (!sConfigLoaded) {
     LoadConfig();
+    mp2nx_load_boost(0, 1); // load_boost.cpp: the title's startup warmup (cleared by CMFGameLoader)
+    mp2nx_start_log_flusher(); // misc_switch.cpp
   }
   ApplyModeScale(false);
   if (ImGui::GetCurrentContext() == nullptr) {

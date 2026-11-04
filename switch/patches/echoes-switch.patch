@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..050b08bad 100644
+index ef1c8c60d..77f067fd5 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..050b08bad 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,38 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,40 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -33,13 +33,15 @@ index ef1c8c60d..050b08bad 100644
 +        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/pthread_wrap.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/sqlite_switch.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/rename_wrap.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/rename_wrap.cpp
++        ${MP2NX_ROOT}/switch/source/platform/load_boost.cpp
++        ${MP2NX_ROOT}/switch/source/platform/misc_switch.cpp)
 +    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
 +    set_source_files_properties(${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp PROPERTIES
 +        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui;${CMAKE_CURRENT_SOURCE_DIR}/platform/input")
 +    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
 +    target_link_options(metroid_prime2_port PRIVATE
-+        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename)
++        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename -Wl,--wrap=abort -Wl,--wrap=fchmod)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
@@ -50,7 +52,7 @@ index ef1c8c60d..050b08bad 100644
 +            SQLITE_OMIT_LOAD_EXTENSION=1)
 +    endif()
 +    nx_generate_nacp(mp2-nx.nacp NAME "Metroid Prime 2: Echoes" AUTHOR "mp2-nx" VERSION "0.1.0")
-+    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
++    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp ICON ${MP2NX_ROOT}/switch/res/icon.jpg OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
 +endif()
 diff --git a/platform/debug_ui/window.cpp b/platform/debug_ui/window.cpp
 index 2b05502ac..c9b72c552 100644
@@ -107,6 +109,103 @@ index 2b05502ac..c9b72c552 100644
  
    if (!open) {
      sVisible = false;
+diff --git a/platform/main.cpp b/platform/main.cpp
+index a3d106a14..1a7fddffd 100644
+--- a/platform/main.cpp
++++ b/platform/main.cpp
+@@ -1270,9 +1270,18 @@ int main(int argc, char** argv) {
+   // what a minute of frames didn't draw, under 512 MiB all but what the last frames drew (GLOBAL
+   // pipelines stay). Overrides: MP2_PIPELINE_TRIM_MIB / MP2_PIPELINE_TRIM_SEVERE_MIB (0 turns a
+   // level off), MP2_PIPELINE_EVICT=<frames> (a fixed idle sweep at every frame start, any mode).
++#if defined(__SWITCH__)
++  // mp2-nx: the Switch precompiles (smooth returns to known areas) but trims under pressure too:
++  // every precompiled pipeline stays alive otherwise, and Alek's Dusklight hit a fatal at 65 MiB
++  // free that way. Thresholds against the heap's free memory (port_memory_log.cpp).
++  if (true) {
++    const int trimMib = port::EnvInt("MP2_PIPELINE_TRIM_MIB", 512);
++    const int severeMib = port::EnvInt("MP2_PIPELINE_TRIM_SEVERE_MIB", 256);
++#else
+   if (config.pipelineCacheLazy) {
+     const int trimMib = port::EnvInt("MP2_PIPELINE_TRIM_MIB", 1024);
+     const int severeMib = port::EnvInt("MP2_PIPELINE_TRIM_SEVERE_MIB", 512);
++#endif
+     PortMemoryLog::SetPipelinePressure(trimMib, severeMib);
+     if (std::getenv("MP2_PIPELINE_TRIM_MIB") != nullptr ||
+         std::getenv("MP2_PIPELINE_TRIM_SEVERE_MIB") != nullptr) {
+diff --git a/platform/port_memory_log.cpp b/platform/port_memory_log.cpp
+index 866538a59..7ae458a8c 100644
+--- a/platform/port_memory_log.cpp
++++ b/platform/port_memory_log.cpp
+@@ -4,11 +4,16 @@
+ 
+ #include <cstdio>
+ 
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__SWITCH__)
+ #include <cstdlib>
+ #include <cstring>
+ #include <unistd.h>
+ #endif
++#if defined(__SWITCH__)
++#include <malloc.h>
++extern "C" char* fake_heap_start; // libnx: the heap newlib's malloc grows into
++extern "C" char* fake_heap_end;
++#endif
+ 
+ #if defined(__ANDROID__)
+ #include <SDL3/SDL_system.h>
+@@ -18,7 +23,7 @@
+ #endif
+ 
+ namespace PortMemoryLog {
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__SWITCH__)
+ namespace {
+ 
+ constexpr uint64_t kSampleNs = 1000000000ull;
+@@ -26,6 +31,25 @@ constexpr uint64_t kPeriodNs = 30 * kSampleNs;
+ constexpr int64_t kProcessJumpKb = 64 * 1024;
+ constexpr int64_t kSystemJumpKb = 128 * 1024;
+ 
++#if defined(__SWITCH__)
++// mp2-nx: Horizon has no /proc. libnx hands the whole heap to the process at startup
++// (__nx_heap_size 0), so svcGetInfo's used memory is always nearly all of it; what counts is how
++// much of that heap malloc has handed out (GPU memory included: NVK allocates from it).
++int64_t ProcessKb() { return static_cast< int64_t >(mallinfo().uordblks / 1024); }
++
++struct SystemMemory {
++  int64_t totalKb = -1;
++  int64_t availableKb = -1;
++};
++
++SystemMemory ReadSystem() {
++  SystemMemory memory;
++  const int64_t heapKb = static_cast< int64_t >((fake_heap_end - fake_heap_start) / 1024);
++  memory.totalKb = heapKb;
++  memory.availableKb = heapKb - ProcessKb();
++  return memory;
++}
++#else
+ // Resident size of this process, in KiB; -1 when /proc can't say.
+ int64_t ProcessKb() {
+   FILE* file = std::fopen("/proc/self/statm", "r");
+@@ -61,6 +85,7 @@ SystemMemory ReadSystem() {
+   std::fclose(file);
+   return memory;
+ }
++#endif
+ 
+ long long Mib(int64_t kb) { return kb < 0 ? -1 : static_cast< long long >(kb / 1024); }
+ 
+@@ -262,7 +287,7 @@ void Tick(uint64_t) {}
+ #endif
+ 
+ void SetPipelinePressure(int64_t moderateMib, int64_t severeMib) {
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__SWITCH__)
+   sPressureModerateKb = moderateMib > 0 ? moderateMib * 1024 : 0;
+   sPressureSevereKb = severeMib > 0 ? severeMib * 1024 : 0;
+ #else
 diff --git a/platform/rel.cpp b/platform/rel.cpp
 index f4ff077ce..298a34ddb 100644
 --- a/platform/rel.cpp
@@ -170,3 +269,70 @@ index f4ff077ce..298a34ddb 100644
    VirtualFree(m_base, 0, MEM_RELEASE);
  #else
    munmap(m_base, m_size);
+diff --git a/src/MetroidPrime/CMFGameLoader.cpp b/src/MetroidPrime/CMFGameLoader.cpp
+index 468523c04..29ccf33a4 100644
+--- a/src/MetroidPrime/CMFGameLoader.cpp
++++ b/src/MetroidPrime/CMFGameLoader.cpp
+@@ -1,4 +1,8 @@
+ #include "MetroidPrime/CMFGameLoader.hpp"
++#if defined(__SWITCH__)
++// mp2-nx switch/source/platform/load_boost.cpp: compile thread boost and CPU FastLoad while loading.
++extern "C" void mp2nx_load_boost(int reason, int on);
++#endif
+ 
+ #include "MetroidPrime/CArchitectureQueue.hpp"
+ #include "MetroidPrime/CInGameGuiManagerSet.hpp"
+@@ -37,6 +41,10 @@ static rstl::vector< rstl::string > BuildGunPakList();
+ CMFGameLoader::CMFGameLoader()
+ : CIOWin(rstl::string_l("CMFGameLoader")), mInitialized(false), mTransitionFinished(false) {
+   gResFactoryUnknown = 1;
++#if defined(__SWITCH__)
++  mp2nx_load_boost(0, 0); // the title's startup warmup ends here
++  mp2nx_load_boost(1, 1);
++#endif
+   CModel::DisableTextureTimeout();
+ 
+   const CMain::ERestartMode restartMode = gpMain->GetRestartMode();
+@@ -82,6 +90,9 @@ CMFGameLoader::CMFGameLoader()
+ }
+ 
+ CMFGameLoader::~CMFGameLoader() {
++#if defined(__SWITCH__)
++  mp2nx_load_boost(1, 0);
++#endif
+   CGraphics::SetIsBeginSceneClearFb(true);
+   gResFactoryUnknown = 2;
+ }
+diff --git a/src/MetroidPrime/CWorldTransManager.cpp b/src/MetroidPrime/CWorldTransManager.cpp
+index de0044446..2a49a83db 100644
+--- a/src/MetroidPrime/CWorldTransManager.cpp
++++ b/src/MetroidPrime/CWorldTransManager.cpp
+@@ -1,4 +1,8 @@
+ #include "MetroidPrime/Player/CWorldTransManager.hpp"
++#if defined(__SWITCH__)
++// mp2-nx switch/source/platform/load_boost.cpp: compile thread boost and CPU FastLoad while loading.
++extern "C" void mp2nx_load_boost(int reason, int on);
++#endif
+ 
+ #include "Kyoto/Audio/CSfxManager.hpp"
+ #include "Kyoto/Audio/CStreamAudioManager.hpp"
+@@ -303,6 +307,9 @@ void CWorldTransManager::Update(float dt) {
+ }
+ 
+ void CWorldTransManager::UpdateDisabled(float dt) {
++#if defined(__SWITCH__)
++  mp2nx_load_boost(2, 0);
++#endif
+   if (mCurTime > 2.f) {
+     mTransitionFinished = true;
+   }
+@@ -330,6 +337,9 @@ void CWorldTransManager::UpdatePortalTransition(float dt) {
+ }
+ 
+ void CWorldTransManager::UpdateEnabled(float dt) {
++#if defined(__SWITCH__)
++  mp2nx_load_boost(2, 1); // an elevator or world transition: the next world is loading
++#endif
+ #ifdef TARGET_PC
+   // Skip ride: the load is done once the loader asks the text to fade (StartTextFadeOut).
+   if (mPortSkipRide && mStopSoon) {
