@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..34fecd705 100644
+index ef1c8c60d..767d4d774 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..34fecd705 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,50 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,56 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -44,6 +44,12 @@ index ef1c8c60d..34fecd705 100644
 +    target_link_options(metroid_prime2_port PRIVATE
 +        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename -Wl,--wrap=abort -Wl,--wrap=fchmod)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
++    # deko3d phase 0: the toolchain and its smoke test (switch/cmake/mp2_deko3d.cmake)
++    include(${MP2NX_ROOT}/switch/cmake/mp2_deko3d.cmake)
++    if(MP2NX_DEKO3D)
++        target_link_libraries(metroid_prime2_port PRIVATE mp2nx_deko)
++        target_compile_definitions(mp_port_audio PRIVATE MP2NX_DEKO3D=1)
++    endif()
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
 +    set_source_files_properties(platform/port_console.cpp PROPERTIES COMPILE_OPTIONS "-include;arpa/inet.h")

@@ -34,6 +34,11 @@
 
 extern "C" void mp2nx_load_boost(int reason, int on);
 extern "C" void mp2nx_start_log_flusher(void);
+#if MP2NX_DEKO3D
+// switch/source/deko/dk_smoke.cpp: the deko3d phase 0 smoke test
+extern "C" const char* mp2nx_dk_smoke_start(int want);
+extern "C" bool mp2nx_dk_smoke_summary(char* out, size_t size);
+#endif
 
 namespace PortDebug::SwitchMenu {
 namespace {
@@ -45,6 +50,8 @@ float sHandheldScale = 0.f;
 float sDockedScale = 0.f;
 bool sShowFps = false;
 bool sMenuButtonsDefaulted = false; // the Switch default for Separate menu buttons was applied once
+bool sDekoTest = false;             // run the deko3d test on the next start (once; cleared when it starts)
+bool sDekoTestThisStart = false;    // it runs on this start
 bool sConfigLoaded = false;
 int sAppliedMode = -1; // AppletOperationMode the resolution was last applied for
 
@@ -66,6 +73,8 @@ void LoadConfig() {
       sShowFps = i != 0;
     } else if (std::sscanf(line, "menu_buttons_defaulted=%d", &i) == 1) {
       sMenuButtonsDefaulted = i != 0;
+    } else if (std::sscanf(line, "deko3d_test=%d", &i) == 1) {
+      sDekoTest = i != 0;
     }
   }
   std::fclose(f);
@@ -77,8 +86,8 @@ void SaveConfig() {
     std::fprintf(stderr, "mp2-nx: menu: could not write %s\n", kConfigPath);
     return;
   }
-  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmenu_buttons_defaulted=%d\n",
-               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0);
+  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmenu_buttons_defaulted=%d\ndeko3d_test=%d\n",
+               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0, sDekoTest ? 1 : 0);
   std::fclose(f);
 }
 
@@ -769,6 +778,17 @@ std::vector< Row > BuildRows(int page) {
     char fps[32];
     std::snprintf(fps, sizeof(fps), "%.0f", static_cast< double >(sFps));
     rows.push_back({"Frames per second", fps, "", nullptr, nullptr, false});
+#if MP2NX_DEKO3D
+    rows.push_back({"deko3d test (next start)",
+                    sDekoTestThisStart ? "Running now" : (sDekoTest ? "On" : "Off"),
+                    "Tests the new renderer's shader tools once, on the next start. The game still draws with Vulkan",
+                    [](int) {
+                      sDekoTest = !sDekoTest;
+                      SaveConfig();
+                      Toast(sDekoTest ? "Close and restart the game to run the deko3d test" : "deko3d test off");
+                    },
+                    nullptr});
+#endif
     rows.push_back({"mp2-nx", "Echoes Unbound on Switch", "", nullptr, nullptr, false});
     break;
   }
@@ -807,12 +827,35 @@ void DrawAlways() {
       SaveConfig();
     }
     mp2nx_start_log_flusher(); // misc_switch.cpp
+#if MP2NX_DEKO3D
+    // The test runs on the start after it was asked for, once: the setting is cleared before it runs,
+    // so a crash in it cannot repeat (dk_smoke.cpp also skips it after a start it did not finish).
+    sDekoTestThisStart = sDekoTest;
+    if (sDekoTest) {
+      sDekoTest = false;
+      SaveConfig();
+    }
+    if (const char* msg = mp2nx_dk_smoke_start(sDekoTestThisStart ? 1 : 0)) {
+      sDekoTestThisStart = false;
+      Toast(msg, 6000);
+    } else if (sDekoTestThisStart) {
+      Toast("deko3d test running (about a minute; the game keeps going)", 5000);
+    }
+#endif
   }
   ApplyModeScale(false);
   if (ImGui::GetCurrentContext() == nullptr) {
     return;
   }
   const u64 now = NowMs();
+#if MP2NX_DEKO3D
+  {
+    char summary[256];
+    if (mp2nx_dk_smoke_summary(summary, sizeof(summary))) {
+      Toast(summary, 10000);
+    }
+  }
+#endif
   if (sWatchStateMessage) {
     const std::string msg = PortSaveState::LastMessage();
     if (!msg.empty() && msg != sStateMessageBefore) {

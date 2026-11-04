@@ -41,4 +41,12 @@ if [ ! -e dawn/.mp2nx-patched ]; then
   git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-worker-stack.patch"
   touch dawn/.mp2nx-patched
 fi
+# deko3d (docs/deko3d-plan.md): deko3d 0.5.0 and uam 1.1.0 with their patches come from SwitchWaker
+# (centollOS, MIT; deko3d and uam zlib), and Tint's GLSL writer gets SwitchWaker's two options.
+gitpin switchwaker https://github.com/centollOS/SwitchWaker 084291f791d40b0ce2d389659bad0acab375d5f3
+if [ ! -e dawn/.mp2nx-tint-patched ]; then
+  git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-depth-zero-to-one.patch"
+  git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-position-y-up.patch"
+  touch dawn/.mp2nx-tint-patched
+fi
 echo "sources ready in $DEPS"

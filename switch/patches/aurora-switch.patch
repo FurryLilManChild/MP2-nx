@@ -497,7 +497,7 @@ index efddaaf2a..f667bc960 100644
                                   worker_main};
  }
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index f9d2ad809..d3efd625a 100644
+index f9d2ad809..048dfd7a2 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
 @@ -1,3 +1,4 @@
@@ -505,17 +505,20 @@ index f9d2ad809..d3efd625a 100644
  #include "../gfx/hash.hpp"
  #include "../gfx/hdr_tone.hpp"
  #include "../gfx/probe.hpp"
-@@ -29,6 +30,9 @@
+@@ -29,6 +30,12 @@
  #include "tracy/Tracy.hpp"
  
  namespace aurora::gx {
 +// mp2-nx: time spent in build_shader (WGSL generation and Dawn's CreateShaderModule, which parses it) on
 +// this thread, so the pipeline compile log can split it from the rest (Tint's SPIR-V and the driver).
 +thread_local uint64_t g_buildShaderNs = 0;
++// mp2-nx deko3d phase 0: the smoke test (switch/source/deko/dk_smoke.cpp) sets this to copy the GX
++// shaders it compiles with uam; null otherwise. Called on the compile thread with the final WGSL.
++void (*g_mp2nxShaderTap)(const std::string& wgsl) = nullptr;
  using namespace fmt::literals;
  using namespace std::string_literals;
  using namespace std::string_view_literals;
-@@ -4981,6 +4985,13 @@ bool shader_overridden(u64 hash) noexcept {
+@@ -4981,6 +4988,13 @@ bool shader_overridden(u64 hash) noexcept {
  
  wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlphaMode) noexcept {
    ZoneScoped;
@@ -529,6 +532,16 @@ index f9d2ad809..d3efd625a 100644
    auto shaderSource = build_shader_source(config);
    if (!apply_dst_alpha_mode(shaderSource, dstAlphaMode)) {
      dstAlphaMode = DstAlphaMode::None;
+@@ -5014,6 +5028,9 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlp
+       Log.error("wgsl override {:016x} rejected, using the generated source: {}", static_cast<u64>(hash), error);
+     }
+   }
++  if (auto* tap = g_mp2nxShaderTap) {
++    tap(shaderSource);
++  }
+   wgpu::ShaderSourceWGSL wgslDescriptor{};
+   wgslDescriptor.code = shaderSource.c_str();
+   const auto shaderDescriptor = wgpu::ShaderModuleDescriptor{
 diff --git a/lib/input.cpp b/lib/input.cpp
 index adb5c1f57..7fa852747 100644
 --- a/lib/input.cpp

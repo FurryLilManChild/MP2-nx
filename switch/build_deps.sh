@@ -24,7 +24,7 @@ if [ ! -f "$PREFIX/lib/libwebgpu_dawn.a" ]; then
     -DDAWN_SUPPORTS_GLFW_FOR_WINDOWING=OFF -DDAWN_BUILD_SAMPLES=OFF -DDAWN_BUILD_TESTS=OFF -DDAWN_BUILD_BENCHMARKS=OFF \
     -DDAWN_BUILD_PROTOBUF=OFF -DDAWN_ENABLE_INSTALL=ON -DDAWN_BUILD_MONOLITHIC_LIBRARY=STATIC \
     -DDAWN_FETCH_DEPENDENCIES=OFF -DTINT_BUILD_TESTS=OFF -DTINT_BUILD_CMD_TOOLS=OFF -DTINT_BUILD_IR_BINARY=OFF \
-    -DTINT_BUILD_GLSL_WRITER=OFF -DTINT_BUILD_HLSL_WRITER=OFF -DTINT_BUILD_MSL_WRITER=OFF -DABSL_PROPAGATE_CXX_STD=ON
+    -DTINT_BUILD_GLSL_WRITER=ON -DTINT_BUILD_GLSL_VALIDATOR=OFF -DTINT_BUILD_HLSL_WRITER=OFF -DTINT_BUILD_MSL_WRITER=OFF -DABSL_PROPAGATE_CXX_STD=ON
   ninja -C "$OUT/build-dawn" -j"$JOBS" webgpu_dawn
   # Dawn's install step builds every target (some do not build for Horizon); only the monolithic
   # library and the headers are needed. The library is stripped of debug info: 1.7 GB to 40 MB.
@@ -34,6 +34,15 @@ if [ ! -f "$PREFIX/lib/libwebgpu_dawn.a" ]; then
   cp -r "$DAWN_SRC/include/." "$PREFIX/include/"
   cp -r "$OUT/build-dawn/gen/include/." "$PREFIX/include/"
   cp "$REPO/switch/cmake/DawnConfig.cmake" "$PREFIX/lib/cmake/Dawn/DawnConfig.cmake"
+fi
+
+# deko3d phase 0 (switch/cmake/mp2_deko3d.cmake): Tint's GLSL writer and what it needs, as separate archives
+if [ ! -f "$PREFIX/lib/tint/libtint_lang_glsl_writer.a" ]; then
+  ninja -C "$OUT/build-dawn" -j"$JOBS" tint_lang_glsl_writer tint_api tint_lang_wgsl_reader tint_lang_wgsl_inspector
+  mkdir -p "$PREFIX/lib/tint"
+  for lib in "$OUT"/build-dawn/src/tint/*.a; do
+    /opt/devkitpro/devkitA64/bin/aarch64-none-elf-strip --strip-debug -o "$PREFIX/lib/tint/$(basename "$lib")" "$lib"
+  done
 fi
 
 if [ ! -f "$PREFIX/lib/libSDL3.a" ]; then
