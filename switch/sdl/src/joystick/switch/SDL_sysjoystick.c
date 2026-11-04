@@ -28,16 +28,18 @@
 // merged player-one pad.
 #define NX_CONNECTABLE_PADS 4
 
-// Joystick buttons, in the order SDL numbers them. The first sixteen are the
-// physical controls; the last four repeat the shoulder buttons so the gamepad
-// mapping can hand them out as MISC1..MISC4 as well. NXJoystickGetGamepadMapping
+// Joystick buttons, in the order SDL numbers them. NXJoystickGetGamepadMapping
 // below refers to these by index.
+// mp2-nx: Alek's layout (for Twilight Princess) called L/R the triggers and ZL/ZR
+// the shoulders, and repeated all four as MISC1..MISC4, so Echoes' prompts and the
+// Switch menu named them wrong ("Button N" for the copies). Here they are what they
+// are: L/R shoulders, ZL/ZR triggers, no copies (the owner, Nov 4: the standard layout
+// that follows, lock-on and free aim on ZL/ZR, is the one he wants).
 static const u64 k_buttons[] = {
     HidNpadButton_A,     HidNpadButton_B,     HidNpadButton_X,      HidNpadButton_Y,
     HidNpadButton_L,     HidNpadButton_R,     HidNpadButton_ZL,     HidNpadButton_ZR,
     HidNpadButton_Minus, HidNpadButton_Plus,  HidNpadButton_StickL, HidNpadButton_StickR,
     HidNpadButton_Up,    HidNpadButton_Down,  HidNpadButton_Left,   HidNpadButton_Right,
-    HidNpadButton_L,     HidNpadButton_R,     HidNpadButton_ZL,     HidNpadButton_ZR,
 };
 
 enum
@@ -213,15 +215,15 @@ static bool NXJoystickGetGamepadMapping(int index, SDL_GamepadMapping *out)
     SDL_zerop(out);
 
     // k_buttons indices: A=0 B=1 X=2 Y=3 L=4 R=5 ZL=6 ZR=7 Minus=8 Plus=9
-    // StickL=10 StickR=11 Up=12 Down=13 Left=14 Right=15, then L R ZL ZR again.
+    // StickL=10 StickR=11 Up=12 Down=13 Left=14 Right=15.
     out->a = OnButton(0);
     out->b = OnButton(1);
     out->x = OnButton(2);
     out->y = OnButton(3);
-    out->lefttrigger = OnButton(4);
-    out->righttrigger = OnButton(5);
-    out->leftshoulder = OnButton(6);
-    out->rightshoulder = OnButton(7);
+    out->leftshoulder = OnButton(4);
+    out->rightshoulder = OnButton(5);
+    out->lefttrigger = OnButton(6);
+    out->righttrigger = OnButton(7);
     out->back = OnButton(8);
     out->start = OnButton(9);
     out->leftstick = OnButton(10);
@@ -230,10 +232,6 @@ static bool NXJoystickGetGamepadMapping(int index, SDL_GamepadMapping *out)
     out->dpdown = OnButton(13);
     out->dpleft = OnButton(14);
     out->dpright = OnButton(15);
-    out->misc1 = OnButton(16);
-    out->misc2 = OnButton(17);
-    out->misc3 = OnButton(18);
-    out->misc4 = OnButton(19);
     out->leftx = OnAxis(0);
     out->lefty = OnAxis(1);
     out->rightx = OnAxis(2);
