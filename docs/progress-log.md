@@ -2,6 +2,22 @@
 
 Newest first.
 
+## 2026-11-04: deko-12 (diagnostics) and prep while the owner was away
+
+- deko-12 (built, not yet tested): the owner's photos from deko-11 show whole surfaces flat white or black (far walls in
+  an elevator shaft, pipe rings, plant tips, cave patches) while nearby surfaces of the same kind are right. The log
+  has no errors for them. deko-12 logs every texture sampled before anything wrote it ("diag: ... is sampled before
+  anything wrote it") and every upload or copy the bridge drops, and adds deko3d_env.txt switches MP2DK_MIP0,
+  MP2DK_NO_ZERO and MP2DK_OLD_VIEWS for A/B tests. The owner's run also has AURORA_DUAL_SOURCE=0 (the shot squares that
+  come back as the blast fades).
+- Dawn's Null device held an uninitialised CPU copy of every buffer (about 270 MiB in deko-10's log) that deko3d
+  mode never reads, and refuses buffers past 512 MiB in total. dawn-null-lazy-buffers.patch allocates the copy on
+  first use and raises the cap to 3 GiB; libwebgpu_dawn.a is rebuilt with it (the next NRO links it). The Null
+  backend is not used by the Vulkan renderer.
+- The precompiled shader file needs no new tool: initial_dksh_cache.bin uses the same format as the console's
+  dksh_local.bin (shader, module and named records, compiler id checked). The owner's current dksh_local.bin copied to
+  out/romfs/initial_dksh_cache.bin (outside the repo, game-derived) goes into the next NRO's romfs.
+
 ## 2026-11-04: deko3d phase 1, tests deko-1 to deko-11
 
 The phase 1 renderer (docs/deko3d-phase1-design.md): Aurora's device is Dawn's Null device and its WebGPU calls
