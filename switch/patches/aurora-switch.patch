@@ -833,7 +833,7 @@ index 0c65cc1be..0b8a7f239 100644
  public:
    Thread() noexcept = default;
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
-index a4bd6e697..275065463 100644
+index a4bd6e697..81e082d42 100644
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
 @@ -30,6 +30,13 @@
@@ -876,7 +876,19 @@ index a4bd6e697..275065463 100644
      };
      Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
               magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
-@@ -1542,6 +1560,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1156,6 +1174,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+     description = wgpu::StringView("Unknown");
+   }
+   g_backendType = g_adapterInfo.backendType;
++#if defined(__SWITCH__) && defined(MP2NX_DEKO3D)
++  // mp2-nx: deko3d draws what Aurora would give Vulkan (the same WGSL, ImGui through WebGPU, no SDL
++  // renderer), so the Null device is reported as Vulkan to the rest of Aurora
++  if (mp2nx_dk_active()) g_backendType = wgpu::BackendType::Vulkan;
++#endif
+   const auto backendName = magic_enum::enum_name(g_backendType);
+   auto vendorName = g_adapterInfo.vendor;
+   if (vendorName.IsUndefined()) {
+@@ -1542,6 +1565,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
      g_device.SetLoggingCallback(wgpu_log);
    }
    g_queue = g_device.GetQueue();
