@@ -120,7 +120,7 @@ index 2b05502ac..c9b72c552 100644
    if (!open) {
      sVisible = false;
 diff --git a/platform/input/port_input_devices.cpp b/platform/input/port_input_devices.cpp
-index cc7e6a6b8..3b57b4a43 100644
+index cc7e6a6b8..02bb72c8c 100644
 --- a/platform/input/port_input_devices.cpp
 +++ b/platform/input/port_input_devices.cpp
 @@ -43,6 +43,11 @@
@@ -135,7 +135,27 @@ index cc7e6a6b8..3b57b4a43 100644
  namespace aurora {
  void request_screenshot() noexcept;
  }
-@@ -1475,6 +1480,16 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
+@@ -237,6 +242,19 @@ void BindMapping(Profile& p, const PADButtonMapping* buttons, u32 buttonCount, c
+     const Action action = PadAxisAction(m.padAxis);
+     const bool trigger = m.padAxis == PAD_AXIS_TRIGGER_L || m.padAxis == PAD_AXIS_TRIGGER_R;
+     if (trigger && TriggerAxisTaken(axes, axisCount, buttons, buttonCount, m.padAxis)) continue;
++#if defined(__SWITCH__)
++    // mp2-nx: the Switch's ZL/ZR are digital, so the game's analog L/R would only ever read fully
++    // pulled (255). The owner (test7): lock-on on ZL with fire held lost strafing, and the same lock-on
++    // on a bumper (the click alone, analog at 180) was fine. So a trigger here is L/R's click
++    // only, exactly what a bumper gives.
++    if (trigger && m.nativeAxis.nativeAxis >= 0 && m.nativeAxis.nativeAxis < PAD_RAW_AXIS_COUNT) {
++      const bool left = m.padAxis == PAD_AXIS_TRIGGER_L;
++      if (!(left ? lSet : rSet)) {
++        Bind(p, left ? Action::PadL : Action::PadR, Make(Device::PadAxis, m.nativeAxis.nativeAxis, 1));
++      }
++      continue;
++    }
++#endif
+     if (m.nativeAxis.nativeAxis >= 0 && m.nativeAxis.nativeAxis < PAD_RAW_AXIS_COUNT) {
+       Bind(p, action, Make(Device::PadAxis, m.nativeAxis.nativeAxis, m.nativeAxis.sign < 0 ? -1 : 1));
+     } else if (m.nativeAxis.nativeAxis == -1) {
+@@ -1475,6 +1493,16 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
      }
    }
  
