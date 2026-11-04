@@ -50,4 +50,9 @@ if [ ! -e dawn/.mp2nx-tint-patched ]; then
   git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-robustness-buffers-only.patch"
   touch dawn/.mp2nx-tint-patched
 fi
+# deko3d mode: the Null device's buffers allocate their CPU copy on first use, and its 512 MiB cap is lifted
+if [ ! -e dawn/.mp2nx-null-patched ]; then
+  git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-null-lazy-buffers.patch"
+  touch dawn/.mp2nx-null-patched
+fi
 echo "sources ready in $DEPS"

@@ -1,0 +1,71 @@
+diff --git a/src/dawn/native/null/DeviceNull.cpp b/src/dawn/native/null/DeviceNull.cpp
+index a1ae15e5a..c9ac0bb17 100644
+--- a/src/dawn/native/null/DeviceNull.cpp
++++ b/src/dawn/native/null/DeviceNull.cpp
+@@ -370,10 +370,19 @@ BindGroupLayout::BindGroupLayout(DeviceBase* device,
+ 
+ Buffer::Buffer(Device* device, const UnpackedPtr<BufferDescriptor>& descriptor)
+     : BufferBase(device, descriptor) {
++    // mp2-nx: the backing memory is allocated on first use (EnsureBacking). With deko3d the Null device
++    // only keeps the object model, every buffer's contents live in deko3d memory, and an up-front copy
++    // held about 270 MiB that nothing read.
++    mAllocatedSize = GetSize();
++}
++
++void Buffer::EnsureBacking() {
++    if (mBackingData || GetSize() == 0) {
++        return;
++    }
+     // SAFETY: Frontend is responsible for initializing mapped memory.
+     mBackingData =
+         DAWN_UNSAFE_BUFFERS(HeapArray<std::byte>::Uninit(checked_cast<size_t>(GetSize())));
+-    mAllocatedSize = GetSize();
+ }
+ 
+ bool Buffer::IsCPUWritableAtCreation() const {
+@@ -390,6 +399,7 @@ void Buffer::CopyFromStaging(BufferBase* staging,
+                              uint64_t sourceOffset,
+                              uint64_t destinationOffset,
+                              uint64_t size) {
++    EnsureBacking();
+     // TODO(https://crbug.com/524406299): Use Span::CopyFrom.
+     std::ranges::copy(staging->GetCurrentMapping().GetMappedSubspan(
+                           checked_cast<size_t>(sourceOffset), checked_cast<size_t>(size)),
+@@ -398,6 +408,7 @@ void Buffer::CopyFromStaging(BufferBase* staging,
+ 
+ void Buffer::DoWriteBuffer(uint64_t bufferOffset, Span<const std::byte> data) {
+     DAWN_ASSERT(bufferOffset + data.size() <= GetSize());
++    EnsureBacking();
+     DAWN_ASSERT(mBackingData);
+     // TODO(https://crbug.com/524406299): Use Span::CopyFrom.
+     std::ranges::copy(data, mBackingData.subspan(checked_cast<size_t>(bufferOffset)).begin());
+@@ -413,6 +424,7 @@ MaybeError Buffer::FinalizeMapImpl(BufferState newState) {
+ }
+ 
+ void* Buffer::GetMappedPointerImpl() {
++    EnsureBacking();
+     return mBackingData.data();
+ }
+ 
+diff --git a/src/dawn/native/null/DeviceNull.h b/src/dawn/native/null/DeviceNull.h
+index 654335000..ea73e0d76 100644
+--- a/src/dawn/native/null/DeviceNull.h
++++ b/src/dawn/native/null/DeviceNull.h
+@@ -181,7 +181,8 @@ class Device final : public DeviceBase {
+ 
+     std::vector<std::unique_ptr<PendingOperation>> mPendingOperations;
+ 
+-    static constexpr uint64_t kMaxMemoryUsage = 512ULL * 1024 * 1024;
++    // mp2-nx: 512 MiB upstream; the deko3d renderer's buffers are counted here but held in deko3d memory
++    static constexpr uint64_t kMaxMemoryUsage = 3ULL * 1024 * 1024 * 1024;
+     size_t mMemoryUsage = 0;
+ };
+ 
+@@ -279,6 +280,7 @@ class Buffer final : public BufferBase {
+     MaybeError MapAtCreationImpl() override;
+     void* GetMappedPointerImpl() override;
+ 
++    void EnsureBacking();  // mp2-nx: allocated on first use
+     HeapArray<std::byte> mBackingData;
+ };
+ 
