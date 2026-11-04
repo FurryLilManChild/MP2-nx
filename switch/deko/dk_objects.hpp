@@ -34,8 +34,14 @@ struct Buf;  // dk_bridge.hpp
 
 namespace aurora::gfx::dk {
 
+// mp2-nx (deko-7): a destroyed shadow is marked and kept for kGraveFrames frames before it is freed, so a
+// use after its last release reads kDead instead of freed memory, and is logged and skipped
+constexpr uint32_t kAlive = 0x5AD0A11Eu, kDead = 0xDEADD0D0u;
+constexpr uint64_t kGraveFrames = 8;
+
 struct Tex {
     std::atomic<int32_t> refs{1};
+    uint32_t magic = kAlive;  // mp2-nx: kDead once destroyed (kept a few frames, dk_objects.cpp)
     WGPUTexture handle = nullptr;
     WGPUTextureFormat wformat = WGPUTextureFormat_Undefined;
     DkImageFormat format = DkImageFormat_None;
@@ -51,6 +57,7 @@ struct Tex {
 
 struct View {
     std::atomic<int32_t> refs{1};
+    uint32_t magic = kAlive;  // mp2-nx: kDead once destroyed (kept a few frames, dk_objects.cpp)
     WGPUTextureView handle = nullptr;
     Tex* tex = nullptr;
     uint32_t baseMip = 0, mipCount = 1;
@@ -60,6 +67,7 @@ struct View {
 
 struct Samp {
     std::atomic<int32_t> refs{1};
+    uint32_t magic = kAlive;  // mp2-nx: kDead once destroyed (kept a few frames, dk_objects.cpp)
     WGPUSampler handle = nullptr;
     DkSampler sampler{};
     uint64_t key = 0;
@@ -67,6 +75,7 @@ struct Samp {
 
 struct BindGroup {
     std::atomic<int32_t> refs{1};
+    uint32_t magic = kAlive;  // mp2-nx: kDead once destroyed (kept a few frames, dk_objects.cpp)
     WGPUBindGroup handle = nullptr;
     struct Entry {
         uint32_t binding = 0;
@@ -87,6 +96,12 @@ struct BindGroup {
     DkResHandle handles[8] = {};
     uint64_t handlesFrame = 0;
 };
+
+// mp2-nx: false (logged once per kind) for a shadow that was destroyed
+bool alive(const Tex* t, const char* where);
+bool alive(const View* v, const char* where);
+bool alive(const Samp* s, const char* where);
+bool alive(const BindGroup* g, const char* where);
 
 // mp2-nx: one more reference to a shadow (an encoder holds what it recorded) and its release
 void retain(Tex* t);

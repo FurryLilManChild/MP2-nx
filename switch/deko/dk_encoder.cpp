@@ -456,7 +456,8 @@ void begin_pass(Replay& r, const PassDesc& p) {
     const DkImageView* colorPtrs[8] = {};
     for (uint32_t i = 0; i < p.colorCount; i++) {
         View* v = p.colors[i].view;
-        if (v && v->tex && v->tex->valid) {
+        if (v && dko::alive(v, "a pass's colour target") && v->tex && dko::alive(v->tex, "a colour target's texture") &&
+            v->tex->valid) {
             colors[i] = v->view;
             colors[i].pImage = &v->tex->image;
             colors[i].mipLevelCount = 1;
@@ -469,7 +470,8 @@ void begin_pass(Replay& r, const PassDesc& p) {
     }
     DkImageView depth;
     const DkImageView* depthPtr = nullptr;
-    if (p.depth && p.depth->tex && p.depth->tex->valid) {
+    if (p.depth && dko::alive(p.depth, "a pass's depth target") && p.depth->tex &&
+        dko::alive(p.depth->tex, "a depth target's texture") && p.depth->tex->valid) {
         depth = p.depth->view;
         depth.pImage = &p.depth->tex->image;
         depth.mipLevelCount = 1;
@@ -552,14 +554,16 @@ void bind_stage(Replay& r, const Stage& s, DkStage stage) {
     for (const swdk::SlotBinding& b : s.bindings) {
         if (b.kind == swdk::SlotBinding::Kind::Immediates) continue;  // bound at the pass start
         if (b.group >= 4 || !r.groups[b.group].g) continue;
+        if (!dko::alive(r.groups[b.group].g, "a draw's bind group")) continue;
         const BoundGroup& bg = r.groups[b.group];
         const BindGroup::Entry* e = dko::bind_group_entry(bg.g, b.binding);
         if (b.kind == swdk::SlotBinding::Kind::Sampler) {
             View* view = e ? e->view : nullptr;
+            if (view && !dko::alive(view, "a bind group's texture view")) view = nullptr;
             Samp* samp = nullptr;
             if (b.samplerGroup < 4 && r.groups[b.samplerGroup].g) {
                 const BindGroup::Entry* se = dko::bind_group_entry(r.groups[b.samplerGroup].g, b.samplerBinding);
-                if (se) samp = se->sampler;
+                if (se && dko::alive(se->sampler, "a bind group's sampler")) samp = se->sampler;
             }
             dkCmdBufBindTexture(R.cmd, stage, b.slot, dko::texture_handle(view, samp));
             continue;
@@ -811,6 +815,7 @@ Op& add(Enc* e, OpType t) {
 
 View* hold(Enc* e, WGPUTextureView v) {
     View* view = dko::find_view(v);
+    if (view && !dko::alive(view, "recorded in a pass")) view = nullptr;
     if (view) {
         dko::retain(view);
         e->views.push_back(view);
@@ -827,6 +832,7 @@ Buf* hold(Enc* e, WGPUBuffer b) {
 }
 Tex* hold(Enc* e, WGPUTexture t) {
     Tex* tex = dko::find_texture(t);
+    if (tex && !dko::alive(tex, "recorded in a copy")) tex = nullptr;
     if (tex) {
         tex_retain(tex);
         e->texs.push_back(tex);
@@ -970,6 +976,7 @@ void __wrap_wgpuRenderPassEncoderSetBindGroup(WGPURenderPassEncoder p, uint32_t 
     if (!on()) return __real_wgpuRenderPassEncoderSetBindGroup(p, index, group, dynCount, dyn);
     Enc* enc = pass_of(p)->enc;
     BindGroup* g = dko::find_bind_group(group);
+    if (g && !dko::alive(g, "set on a pass")) g = nullptr;
     if (g) {
         dko::retain(g);
         enc->groups.push_back(g);

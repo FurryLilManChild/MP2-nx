@@ -98,10 +98,24 @@ uint64_t fnv_bytes(const void* p, size_t n, uint64_t h = 0xCBF29CE484222325ull) 
     return h;
 }
 
-// ---- destruction (the last reference): under no lock; the maps were updated by the caller
+// ---- destruction (the last reference): under no lock; the maps were updated by the caller. The object
+// is marked dead and kept kGraveFrames frames before it is freed (objects_frame_start).
+std::mutex g_graveMutex;
+struct Grave {
+    uint64_t frame;
+    int kind;  // 0 Tex, 1 View, 2 Samp, 3 BindGroup
+    void* p;
+};
+std::vector<Grave> g_graves;
+void bury(int kind, void* p) {
+    std::lock_guard<std::mutex> lock(g_graveMutex);
+    g_graves.push_back({R.frame, kind, p});
+}
+
 void destroy(Tex* t) {
     if (t->valid && !t->external) swdk::image_free_deferred(t->mem);
-    delete t;
+    t->magic = kDead;
+    bury(0, t);
 }
 void release_tex(Tex* t);
 void destroy(View* v) {
@@ -110,19 +124,24 @@ void destroy(View* v) {
         g_freedSlots.push_back(v->slot);
     }
     Tex* t = v->tex;
-    delete v;
+    v->magic = kDead;
+    bury(1, v);
     if (t) release_tex(t);
 }
 void release_view(View* v);
 void release_sampler(Samp* s);
-void destroy(Samp* s) { delete s; }
+void destroy(Samp* s) {
+    s->magic = kDead;
+    bury(2, s);
+}
 void destroy(BindGroup* g) {
     for (auto& e : g->entries) {
         if (e.view) release_view(e.view);
         if (e.sampler) release_sampler(e.sampler);
         if (e.buf) mp2dk::buffer_release(e.buf);
     }
-    delete g;
+    g->magic = kDead;
+    bury(3, g);
 }
 
 template <class T> bool drop(std::unordered_map<const void*, T*>& map, T* obj, uint64_t ObjectStats::*alive) {
@@ -218,6 +237,19 @@ Tex* make_texture(WGPUTexture handle, const WGPUTextureDescriptor& d) {
 }
 
 }  // namespace
+
+bool dead_use(const char* kind, const char* where, uint32_t magic) {
+    static int logged = 0;
+    if (logged++ < 24)
+        mp2dk::log("objects: a %s used after its last release (%s, magic 0x%08X): skipped", kind, where, magic);
+    return false;
+}
+bool alive(const Tex* t, const char* where) { return !t || t->magic == kAlive || dead_use("texture", where, t->magic); }
+bool alive(const View* v, const char* where) { return !v || v->magic == kAlive || dead_use("texture view", where, v->magic); }
+bool alive(const Samp* s, const char* where) { return !s || s->magic == kAlive || dead_use("sampler", where, s->magic); }
+bool alive(const BindGroup* g, const char* where) {
+    return !g || g->magic == kAlive || dead_use("bind group", where, g->magic);
+}
 
 void retain(Tex* t) { t->refs.fetch_add(1, std::memory_order_relaxed); }
 void release(Tex* t) { release_tex(t); }
@@ -375,7 +407,8 @@ Samp* find_sampler(WGPUSampler s) { return find(g_samplers, s); }
 BindGroup* find_bind_group(WGPUBindGroup g) { return find(g_bindGroups, g); }
 
 uint32_t view_slot(View* v) {
-    if (!v || !v->tex || !v->tex->valid) return swdk::kEmptyImage;
+    if (!v || !alive(v, "sampled") || !v->tex || !alive(v->tex, "a sampled view's texture") || !v->tex->valid)
+        return swdk::kEmptyImage;
     if (v->slot == 0) {
         const uint32_t slot = swdk::image_slot_alloc();
         if (slot == 0) return swdk::kEmptyImage;
@@ -412,6 +445,24 @@ const DkResHandle* gx_handles(BindGroup* g) {
 }
 
 void objects_frame_start() {
+    {
+        std::vector<Grave> free;
+        {
+            std::lock_guard<std::mutex> lock(g_graveMutex);
+            auto it = std::partition(g_graves.begin(), g_graves.end(),
+                                     [](const Grave& g) { return g.frame + kGraveFrames > R.frame; });
+            free.assign(it, g_graves.end());
+            g_graves.erase(it, g_graves.end());
+        }
+        for (const Grave& g : free) {
+            switch (g.kind) {
+            case 0: delete static_cast<Tex*>(g.p); break;
+            case 1: delete static_cast<View*>(g.p); break;
+            case 2: delete static_cast<Samp*>(g.p); break;
+            default: delete static_cast<BindGroup*>(g.p); break;
+            }
+        }
+    }
     std::vector<uint32_t> slots;
     {
         std::lock_guard<std::mutex> lock(g_slotMutex);
