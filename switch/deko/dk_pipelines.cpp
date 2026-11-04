@@ -437,6 +437,7 @@ WGPURenderPipeline __wrap_wgpuDeviceCreateRenderPipeline(WGPUDevice device, WGPU
     if (!p || !d || !on() || !swdk::R.device) return p;
     auto* pipe = new RPipe;
     pipe->handle = p;
+    note("pipeline build (compile thread)");
     build(pipe, *d);
     {
         std::lock_guard<std::mutex> lock(g_translateMutex);

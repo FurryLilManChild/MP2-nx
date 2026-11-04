@@ -544,8 +544,17 @@ bool prepare_draw(Replay& r) {
     return true;
 }
 
+const char* const kOpNotes[] = {
+    "replay: begin render pass", "replay: end render pass", "replay: set pipeline", "replay: set bind group",
+    "replay: set vertex buffer", "replay: set index buffer", "replay: draw", "replay: draw indexed",
+    "replay: viewport", "replay: scissor", "replay: blend constant", "replay: immediates",
+    "replay: copy buffer to buffer", "replay: copy buffer to texture", "replay: copy texture to buffer",
+    "replay: copy texture to texture", "replay: compute",
+};
+
 void replay(Replay& r, Enc* e) {
     for (const Op& op : e->ops) {
+        note(kOpNotes[int(op.type)]);
         switch (op.type) {
         case OpType::BeginPass: begin_pass(r, e->passes[op.u[0]]); break;
         case OpType::EndPass: end_pass(r); break;
@@ -661,6 +670,7 @@ void replay(Replay& r, Enc* e) {
 
 void replay_queue_ops(Replay& r) {
     if (g_queueOps.empty()) return;
+    note("replay: queue writes");
     for (QueueOp& q : g_queueOps) {
         if (q.texture) {
             buffer_to_image(r, q.src, q.rowBytes, q.rows, q.tex, q.mip, q.origin, q.extent);
@@ -697,6 +707,7 @@ void submit_cmds_locked(Enc* const* encs, size_t count, const char* why) {
     replay_queue_ops(r);
     for (size_t i = 0; i < count; i++)
         if (encs[i]) replay(r, encs[i]);
+    note("submit: fence and send");
     if (r.transfer) dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
     // the submit's fence: its slot must be free (the submit kFenceRing earlier finished)
     const uint64_t serial = g_nextSerial;
@@ -710,6 +721,7 @@ void submit_cmds_locked(Enc* const* encs, size_t count, const char* why) {
     g_totals.submits++;
     g_totals.draws += r.draws;
     g_totals.skipped += r.skippedDraws;
+    note("idle (between submits)");
 }
 
 void submit_locked(const char* why) { submit_cmds_locked(nullptr, 0, why); }
@@ -1145,6 +1157,7 @@ void __wrap_wgpuQueueWriteTexture(WGPUQueue queue, WGPUTexelCopyTextureInfo cons
     if (!on()) return __real_wgpuQueueWriteTexture(queue, dst, data, dataSize, layout, size);
     Tex* t = dko::find_texture(dst->texture);
     if (!t || !t->valid || size->width == 0 || size->height == 0) return;
+    note("queue write texture");
     // rows of blocks, repacked to 256-byte rows
     const uint32_t bw = t->blockW, bh = t->blockH;
     const uint32_t blocksW = (size->width + bw - 1) / bw, blocksH = (size->height + bh - 1) / bh;

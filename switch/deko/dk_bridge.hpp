@@ -96,6 +96,10 @@ void presented();
 // the swapchain image slot of the current frame, acquired on first use (-1 outside a surface frame)
 int current_image();
 
+// ---- the crash handler's note (switch/source/platform/startup.cpp): what the renderer last started
+extern "C" const char* volatile mp2nx_crash_note;
+inline void note(const char* what) { mp2nx_crash_note = what; }
+
 // ---- the log
 void log(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 

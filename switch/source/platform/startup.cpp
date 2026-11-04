@@ -240,6 +240,11 @@ int put_str(char* out, const char* s) {
 }
 }  // namespace
 
+// What the deko3d renderer was doing (switch/deko/dk_encoder.cpp), printed by the handler; null with Vulkan.
+extern "C" {
+const char* volatile mp2nx_crash_note = nullptr;
+}
+
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
   char buf[2048];
   int n = 0;
@@ -255,6 +260,11 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
     buf[n++] = '\n';
   };
   n += put_str(buf + n, "mp2-nx crash\n");
+  if (const char* note = mp2nx_crash_note) {
+    n += put_str(buf + n, "renderer: ");
+    for (int i = 0; note[i] != '\0' && i < 120; ++i) buf[n++] = note[i];
+    buf[n++] = '\n';
+  }
   line("error_desc ", ctx->error_desc, false);
   line("pc  ", ctx->pc.x, true);
   line("lr  ", ctx->lr.x, true);
@@ -279,7 +289,9 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
   if (sd != nullptr) {
     static char path[FS_MAX_PATH] = "/switch/" MP2NX_APP_NAME "/logs/crash.txt";
     fsFsDeleteFile(sd, path);
-    fsFsCreateFile(sd, path, 0, 0);
+    // (created at its final size: a write past the end of a file opened without Append fails, which
+    // left crash.txt empty until test deko-2)
+    fsFsCreateFile(sd, path, static_cast<s64>(n), 0);
     FsFile f;
     if (R_SUCCEEDED(fsFsOpenFile(sd, path, FsOpenMode_Write, &f))) {
       fsFileWrite(&f, 0, buf, static_cast<u64>(n), FsWriteOption_Flush);

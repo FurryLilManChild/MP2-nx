@@ -441,6 +441,7 @@ extern "C" {
 WGPUTexture __wrap_wgpuDeviceCreateTexture(WGPUDevice device, WGPUTextureDescriptor const* descriptor) {
     WGPUTexture t = __real_wgpuDeviceCreateTexture(device, descriptor);
     if (t && descriptor && R.device) {
+        mp2dk::note("texture create");
         Tex* shadow = make_texture(t, *descriptor);
         std::unique_lock<std::shared_mutex> lock(g_mutex);
         auto [it, inserted] = g_textures.emplace(t, shadow);
