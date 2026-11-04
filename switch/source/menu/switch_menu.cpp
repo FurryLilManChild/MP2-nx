@@ -8,11 +8,14 @@
 // for docked (applied when the console changes mode), and an FPS counter.
 #include "debug_ui_internal.h"
 
+#include "port_input_devices.h"
 #include "port_mouse.h"
 #include "port_overlay.h"
 #include "port_savestate.h"
 #include "port_video.h"
 
+#include <SDL3/SDL_gamepad.h>
+#include <dolphin/pad.h>
 #include <imgui.h>
 #include <switch.h>
 
@@ -110,6 +113,9 @@ Input ReadInput(bool fresh) {
   Input in;
   if (!sPadReady) {
     padInitializeAny(&sPad);
+    // libnx reports no touches until the touch screen is initialised once (aurora-aleks/Dusklight
+    // switch_touch.cpp:183).
+    hidInitializeTouchScreen();
     sPadReady = true;
   }
   padUpdate(&sPad);
@@ -171,8 +177,8 @@ struct Row {
   bool enabled = true;
 };
 
-enum Page { kGame, kSaveStates, kControls, kVideo, kSystem, kPageCount };
-const char* const kPageNames[kPageCount] = {"Game", "Save states", "Controls", "Video", "System"};
+enum Page { kGame, kSaveStates, kControls, kButtons, kVideo, kSystem, kPageCount };
+const char* const kPageNames[kPageCount] = {"Game", "Save states", "Controls", "Buttons", "Video", "System"};
 
 int sPage = kGame;
 int sSelected[kPageCount] = {};
@@ -195,6 +201,237 @@ void Toast(const std::string& text, u64 ms = 3000) {
 }
 
 const char* OnOff(bool v) { return v ? "On" : "Off"; }
+
+// ---- Button remapping ----
+// Writes the "All controllers" (Default) profile of Echoes' controls.toml, as the F1 Remap page
+// does (port_input_remap_ui.cpp SaveDraft): Materialize the built-in bindings, replace the pad
+// ones, PortInputDevices::SetUserBindings. A button already used by another action here is
+// swapped onto it, so nothing is left unbound by accident.
+using PortInput::Action;
+using PortInput::Family;
+struct RemapEntry {
+  Action action;
+  const char* label;
+};
+const RemapEntry kRemap[] = {
+    {Action::PadA, "Fire (A)"},          {Action::PadB, "Jump (B)"},
+    {Action::PadX, "Morph Ball (X)"},    {Action::PadY, "Missile (Y)"},
+    {Action::PadL, "Lock-on (L)"},       {Action::PadR, "Free aim (R)"},
+    {Action::PadZ, "Map (Z)"},           {Action::PadStart, "Pause (Start)"},
+    {Action::SpringBall, "Spring Ball"},
+};
+
+SDL_Gamepad* PlayerPad() {
+  const s32 index = PADGetIndexForPort(PAD_CHAN0);
+  return PADGetSDLGamepadForIndex(index >= 0 ? static_cast< u32 >(index) : 0);
+}
+
+std::string InputName(const PortInput::Input& in) {
+  if (in.device == PortInput::Device::PadAxis) {
+    if (in.code == SDL_GAMEPAD_AXIS_LEFT_TRIGGER) return "ZL";
+    if (in.code == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) return "ZR";
+    return "Stick";
+  }
+  if (in.device != PortInput::Device::PadButton) {
+    return "?";
+  }
+  const auto button = static_cast< SDL_GamepadButton >(in.code);
+  switch (button) {
+  case SDL_GAMEPAD_BUTTON_SOUTH:
+  case SDL_GAMEPAD_BUTTON_EAST:
+  case SDL_GAMEPAD_BUTTON_WEST:
+  case SDL_GAMEPAD_BUTTON_NORTH: {
+    // The pad's own label for that position (A, B, X, Y as printed on it).
+    SDL_Gamepad* pad = PlayerPad();
+    const SDL_GamepadButtonLabel label =
+        pad != nullptr ? SDL_GetGamepadButtonLabel(pad, button) : SDL_GAMEPAD_BUTTON_LABEL_UNKNOWN;
+    switch (label) {
+    case SDL_GAMEPAD_BUTTON_LABEL_A: return "A";
+    case SDL_GAMEPAD_BUTTON_LABEL_B: return "B";
+    case SDL_GAMEPAD_BUTTON_LABEL_X: return "X";
+    case SDL_GAMEPAD_BUTTON_LABEL_Y: return "Y";
+    default: break;
+    }
+    return button == SDL_GAMEPAD_BUTTON_SOUTH ? "Bottom button"
+           : button == SDL_GAMEPAD_BUTTON_EAST ? "Right button"
+           : button == SDL_GAMEPAD_BUTTON_WEST ? "Left button" : "Top button";
+  }
+  case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return "L";
+  case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return "R";
+  case SDL_GAMEPAD_BUTTON_LEFT_STICK: return "Left stick click";
+  case SDL_GAMEPAD_BUTTON_RIGHT_STICK: return "Right stick click";
+  case SDL_GAMEPAD_BUTTON_START: return "+";
+  case SDL_GAMEPAD_BUTTON_BACK: return "-";
+  case SDL_GAMEPAD_BUTTON_DPAD_UP: return "D-pad up";
+  case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return "D-pad down";
+  case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return "D-pad left";
+  case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return "D-pad right";
+  default: return "Button " + std::to_string(in.code);
+  }
+}
+
+bool IsPadInput(const PortInput::Input& in) {
+  return in.device == PortInput::Device::PadButton || in.device == PortInput::Device::PadAxis;
+}
+
+// The single pad inputs an action has now (built-in plus the player's changes).
+std::vector< PortInput::Input > CurrentPadInputs(Action action) {
+  // Built once per change of the bindings, not once per row and frame.
+  static PortInput::Profile profile;
+  static uint64_t builtFor = ~uint64_t{0};
+  if (builtFor != PortInputDevices::UserBindingsVersion()) {
+    profile = PortInput::Profile{};
+    PortInputDevices::BuildProfile(profile);
+    builtFor = PortInputDevices::UserBindingsVersion();
+  }
+  std::vector< PortInput::Input > out;
+  for (const PortInput::Binding& b : profile.bindings) {
+    if (b.action != action || b.count != 1 || !IsPadInput(b.inputs[0])) continue;
+    if (std::none_of(out.begin(), out.end(),
+                     [&](const PortInput::Input& x) { return PortInput::SamePhysicalInput(x, b.inputs[0]); })) {
+      out.push_back(b.inputs[0]);
+    }
+  }
+  return out;
+}
+
+std::string BindingText(Action action) {
+  const auto inputs = CurrentPadInputs(action);
+  if (inputs.empty()) return "None";
+  std::string text;
+  for (const auto& in : inputs) {
+    if (!text.empty()) text += " / ";
+    text += InputName(in);
+  }
+  return text;
+}
+
+PortInput::UserProfile& DefaultProfile(PortInput::UserBindings& work) {
+  for (auto& p : work.profiles) {
+    if (p.match.empty()) return p;
+  }
+  PortInput::UserProfile p;
+  p.name = "Default";
+  work.profiles.push_back(p);
+  return work.profiles.back();
+}
+
+// Replaces the action's pad bindings with `in` (or none when `in` is not valid).
+void ReplacePad(PortInput::UserProfile& profile, const PortInput::Profile& inherited, Action action,
+                const PortInput::Input& in) {
+  PortInput::Materialize(profile, action, Family::Pad, inherited);
+  for (size_t i = profile.bindings.size(); i-- > 0;) {
+    const PortInput::Binding& b = profile.bindings[i];
+    if (b.action == action && PortInput::BindingFamily(b) == Family::Pad) {
+      PortInput::RemoveUserBinding(profile, i);
+    }
+  }
+  if (in.Valid()) {
+    PortInput::Binding nb;
+    nb.action = action;
+    nb.inputs[0] = in;
+    nb.count = 1;
+    PortInput::AddUserBinding(profile, nb);
+  }
+}
+
+bool AssignButton(Action action, const PortInput::Input& in) {
+  const auto oldInputs = CurrentPadInputs(action);
+  const PortInput::Input oldInput = oldInputs.empty() ? PortInput::Input{} : oldInputs.front();
+  auto current = PortInputDevices::UserBindings();
+  PortInput::UserBindings work = current ? *current : PortInput::UserBindings{};
+  PortInput::Profile inherited;
+  PortInputDevices::BuildBaseProfile(inherited);
+  PortInput::UserProfile& profile = DefaultProfile(work);
+  for (const RemapEntry& e : kRemap) {
+    if (e.action == action) continue;
+    const auto others = CurrentPadInputs(e.action);
+    const bool usesIt = std::any_of(others.begin(), others.end(),
+                                    [&](const PortInput::Input& x) { return PortInput::SamePhysicalInput(x, in); });
+    if (usesIt) {
+      ReplacePad(profile, inherited, e.action, oldInput); // the swap
+    }
+  }
+  ReplacePad(profile, inherited, action, in);
+  const bool ok = PortInputDevices::SetUserBindings(work);
+  std::fprintf(stderr, "mp2-nx: menu: %s -> %s (%s)\n", std::string(PortInput::Info(action).label).c_str(),
+               InputName(in).c_str(), ok ? "saved" : "save FAILED");
+  return ok;
+}
+
+bool ResetButtons() {
+  auto current = PortInputDevices::UserBindings();
+  PortInput::UserBindings work = current ? *current : PortInput::UserBindings{};
+  for (auto& p : work.profiles) {
+    PortInput::ClearFamily(p, Family::Pad);
+  }
+  return PortInputDevices::SetUserBindings(work);
+}
+
+// Capture: wait until every button is up, then take the first press (a button, or ZL/ZR).
+struct Capture {
+  bool active = false;
+  bool armed = false;
+  Action action = Action::None;
+  std::string label;
+  u64 deadline = 0;
+} sCapture;
+bool sResyncPad = false;
+
+bool ReadPadInput(SDL_Gamepad* pad, PortInput::Input& out, bool& anyDown) {
+  anyDown = false;
+  for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; ++b) {
+    if (b == SDL_GAMEPAD_BUTTON_GUIDE) continue;
+    if (SDL_GetGamepadButton(pad, static_cast< SDL_GamepadButton >(b))) {
+      anyDown = true;
+      out = PortInput::Input{};
+      out.device = PortInput::Device::PadButton;
+      out.code = static_cast< uint16_t >(b);
+      return true;
+    }
+  }
+  for (const SDL_GamepadAxis axis : {SDL_GAMEPAD_AXIS_LEFT_TRIGGER, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER}) {
+    if (SDL_GetGamepadAxis(pad, axis) > 20000) {
+      anyDown = true;
+      out = PortInput::Input{};
+      out.device = PortInput::Device::PadAxis;
+      out.code = static_cast< uint16_t >(axis);
+      out.dir = 1;
+      return true;
+    }
+  }
+  return false;
+}
+
+// True while a capture owns the frame.
+bool UpdateCapture() {
+  if (!sCapture.active) return false;
+  SDL_Gamepad* pad = PlayerPad();
+  if (pad == nullptr) {
+    Toast("No controller found");
+    sCapture.active = false;
+    return false;
+  }
+  PortInput::Input in;
+  bool anyDown = false;
+  const bool got = ReadPadInput(pad, in, anyDown);
+  if (!sCapture.armed) {
+    sCapture.armed = !anyDown;
+  } else if (got) {
+    const bool ok = AssignButton(sCapture.action, in);
+    Toast(ok ? sCapture.label + ": " + InputName(in) : "Could not save the controls file");
+    sCapture.active = false;
+    sResyncPad = true; // the press must not also move the menu
+    return true;
+  }
+  if (NowMs() > sCapture.deadline) {
+    Toast("No button pressed, nothing changed");
+    sCapture.active = false;
+    sResyncPad = true;
+  }
+  return true;
+}
+
 
 std::string ScaleLabel(float scale) {
   char buf[48];
@@ -348,6 +585,24 @@ std::vector< Row > BuildRows(int page) {
                     [](int d) { Toggle(sMapInvertX, d); }, nullptr});
     rows.push_back({"Invert map rotation up/down", OnOff(sMapInvertY), "On the map screen",
                     [](int d) { Toggle(sMapInvertY, d); }, nullptr});
+    break;
+  }
+  case kButtons: {
+    for (const RemapEntry& e : kRemap) {
+      if (e.action == Action::SpringBall && !sSpringBall) continue;
+      rows.push_back({e.label, BindingText(e.action),
+                      "Press A, then the Switch button you want. If another action uses it, they swap",
+                      nullptr, [e] {
+                        sCapture.active = true;
+                        sCapture.armed = false;
+                        sCapture.action = e.action;
+                        sCapture.label = e.label;
+                        sCapture.deadline = NowMs() + 6000;
+                      }});
+    }
+    rows.push_back({"Reset buttons to default", "", "Puts every button back the way it started", nullptr, [] {
+                      Toast(ResetButtons() ? "Buttons reset" : "Could not save the controls file");
+                    }});
     break;
   }
   case kVideo: {
@@ -517,7 +772,9 @@ bool Draw() {
     sCloseRequested = false;
     sSlot = std::clamp(PortSaveState::SelectedSlot(), 1, PortSaveState::kSlotCount);
   }
-  const Input in = ReadInput(fresh);
+  const bool capturing = UpdateCapture();
+  const Input in = ReadInput(fresh || capturing || sResyncPad);
+  sResyncPad = false;
 
   if (in.l || in.r) {
     sPage = (sPage + (in.r ? 1 : -1) + kPageCount) % kPageCount;
@@ -579,6 +836,7 @@ bool Draw() {
 
   // Pad
   const int count = static_cast< int >(rows.size());
+  if (!capturing) {
   if (in.up) {
     sel = (sel - 1 + count) % count;
   }
@@ -612,6 +870,7 @@ bool Draw() {
     sCloseRequested = false;
     return false;
   }
+  } // !capturing
   // The rows may have changed (a toggle shows or hides others): rebuild for drawing.
   rows = BuildRows(sPage);
   sel = std::clamp(sel, 0, static_cast< int >(rows.size()) - 1);
@@ -670,6 +929,19 @@ bool Draw() {
   }
   const std::string footer = "Up/Down move    Left/Right change    A select    B close    L/R page";
   Text(dl, font, smallSize, ImVec2(p0.x + padX, footerY), Col(0.5f, 0.52f, 0.58f), footer);
+  if (sCapture.active) {
+    const std::string line1 = "Press the button for " + sCapture.label;
+    const std::string line2 = "Waiting " + std::to_string(static_cast< int >((sCapture.deadline - std::min(sCapture.deadline, NowMs())) / 1000 + 1)) + " s";
+    const float w = std::max(TextWidth(font, textSize, line1), TextWidth(font, smallSize, line2)) + 80.f * unit;
+    const ImVec2 c(display.x * 0.5f, display.y * 0.5f);
+    const ImVec2 b0(c.x - w * 0.5f, c.y - 60.f * unit);
+    const ImVec2 b1(c.x + w * 0.5f, c.y + 60.f * unit);
+    dl->AddRectFilled(b0, b1, Col(0.03f, 0.03f, 0.05f, 0.97f), 12.f * unit);
+    dl->AddRect(b0, b1, accent, 12.f * unit, 0, 2.f * unit);
+    Text(dl, font, textSize, ImVec2(c.x - TextWidth(font, textSize, line1) * 0.5f, c.y - 36.f * unit), Col(1, 1, 1), line1);
+    Text(dl, font, smallSize, ImVec2(c.x - TextWidth(font, smallSize, line2) * 0.5f, c.y + 10.f * unit),
+         Col(0.7f, 0.72f, 0.78f), line2);
+  }
   return true;
 }
 

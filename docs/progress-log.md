@@ -2,6 +2,24 @@
 
 Newest first.
 
+## 2026-11-03: switch-test4 result, test5 (button remapping)
+
+- Test4: the caches persist (`271 pipelines ready 35702 ms after startup`, from test3's list); 64 new pipelines in
+  new areas. Card: no errors; the game created a new MetroidPrime2 save and the owner confirmed the save station saved.
+  Save state slot 1 saved (`saved slot 1 (Temple Grounds - Hive Chamber A)`). Menu: the owner says it feels great.
+- Alek audit (aurora-aleks and his Dusklight Switch repo, CC0): the findings, HIGH first, are the test6 list: compile
+  thread boost and CPU FastLoad during loads, quick_check on every cache open (18.5 s measured by Alek on a big Dawn
+  cache), pipeline memory (Echoes keeps every precompiled pipeline; trim needs a Horizon memory source), clean exit
+  through AM (`__nx_applet_exit_mode`, avoids 2001-0106 and "the software was closed"), journal_mode TRUNCATE,
+  cache shutdown lock, no prune/VACUUM on Switch, shader module reuse, buffered logging, audio sample frames 4096,
+  abort wrap, texture budget 640 MB, NRO icon, rumble and gyro over libnx, suspend clock, a seed pipeline list read in
+  memory (not Echoes' merge-every-start).
+- Test5: Buttons page in the Switch menu (Fire, Jump, Morph Ball, Missile, Lock-on, Free aim, Map, Pause, Spring
+  Ball): capture through SDL, swap with the action that had the button, written to the Default profile of
+  controls.toml the way the F1 Remap page does; Reset buttons. Plus: hidInitializeTouchScreen (touch did nothing),
+  render worker pinned to Affinity::Render, CardGciFolder skips unreadable or short .gci files, the io.cpp rename
+  special case dropped (rename_wrap covers it; it logged a harmless ENOENT).
+
 ## 2026-11-03: switch-test3 result, test4 (saves, Switch menu, save states)
 
 - Test3: both caches opened (`SQLite cache init succeeded`, 100 pipelines compiled and stored), so the SQLite VFS fix
@@ -80,7 +98,8 @@ Newest first.
   3227d76 (2026-09-29) plus Switch and deko3d. A full merge left 30 files in conflict; Alek's changes are tangled with
   his own features (Flip Grip, rumble and motion APIs, a reworked SQLite cache layer). Took the minimal route instead:
   `switch/patches/aurora-switch.patch` (Horizon surface, docked size, big-stack and core-pinned threads, one 8 MiB
-  shader compile thread, Switch texture cache budget).
+  shader compile thread). Correction (Nov 3, Alek audit): the Switch texture cache budget was listed here but never
+  made it into the patch.
 - Dawn: encounter/dawn 1155e0ed (the same base as Odran's fork; his extra commits are OpenGL only) with Alek's two
   patches, built standalone into `out/prefix` (`switch/build_deps.sh`). SDL3: devkitPro's Switch branch c329016c with
   Alek's video and joystick overlay.

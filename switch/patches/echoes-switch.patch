@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..4d211c661 100644
+index ef1c8c60d..050b08bad 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -36,7 +36,7 @@ index ef1c8c60d..4d211c661 100644
 +        ${MP2NX_ROOT}/switch/source/platform/rename_wrap.cpp)
 +    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
 +    set_source_files_properties(${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp PROPERTIES
-+        INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui)
++        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui;${CMAKE_CURRENT_SOURCE_DIR}/platform/input")
 +    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
 +    target_link_options(metroid_prime2_port PRIVATE
 +        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename)
