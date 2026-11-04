@@ -2,6 +2,14 @@
 
 Newest first.
 
+## 2026-11-04: v0.1.0 private test release
+
+Test8 confirmed by the owner (Fire on ZR charges and strafes). Packaged as `mp2-nx-v0.1.0-switch.zip` (sha256 974abe98...,
+NRO 3c08038e..., commit 761e700): the NRO with the built-in starter shader list (kept, since the release is private),
+README.txt, a disc-image note, and the Echoes Unbound (MIT), decomp (CC0) and Dusklight Switch (CC0) licenses.
+Release notes in `C:\MP2-nx\out\release\`. This session cannot push tags or create releases; the owner publishes it
+(tag v0.1.0 on main). Next: deko3d (stage 2).
+
 ## 2026-11-04: test7 result, test8
 
 - Test7 logs: the starter list merged once (1,282 rows, 3,018 uses) and the next start skipped it ("already merged").
