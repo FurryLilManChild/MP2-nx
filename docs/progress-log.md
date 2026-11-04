@@ -2,6 +2,21 @@
 
 Newest first.
 
+## 2026-11-04: deko3d phase 0 (plumbing and smoke test)
+
+- Tint's GLSL writer built with Dawn (TINT_BUILD_GLSL_WRITER=ON; the GLSL validator off, it would pull in
+  glslang), with SwitchWaker's two Tint options (depth_zero_to_one, disable_position_y_negation). Both touch only
+  the GLSL writer, so the Vulkan path is unchanged. Dawn's monolithic library was rebuilt in the same build so its
+  Tint objects match the separate Tint archives (prefix lib/tint, 65 archives, 16 MB stripped).
+- deko3d 0.5.0 and uam 1.1.0 from SwitchWaker 084291f build for the console (switch/cmake/mp2_deko3d.cmake). The
+  uam rename step found 0 clashing symbols with this NVK libvulkan.a; checked separately with nm (3,589 uam
+  symbols, 14,963 NVK symbols, none shared). The NRO links with no duplicate-symbol errors.
+- Smoke test (switch/source/deko/dk_smoke.cpp), off unless chosen: System page "deko3d test (next start)" runs it
+  once on the next start, on its own thread (8 MiB stack, core 2). It creates a deko3d device next to Dawn/NVK,
+  compiles a test shader and the first 40 GX shaders (a tap in Aurora's build_shader) through Tint GLSL and uam,
+  loads the DKSH into code memory, and logs "[deko3d test]" timings; a toast shows the summary. A marker file makes
+  the next start skip it after a crash or hang. Not yet run on hardware.
+
 ## 2026-11-04: v0.1.0 private test release
 
 Test8 confirmed by the owner (Fire on ZR charges and strafes). Packaged as `mp2-nx-v0.1.0-switch.zip` (sha256 974abe98...,
