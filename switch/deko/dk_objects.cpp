@@ -274,6 +274,7 @@ Tex* make_external_texture(WGPUTexture handle, const WGPUTextureDescriptor& d, c
     t->image = image;
     t->valid = true;
     t->external = true;
+    t->written = true;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_textures[handle] = t;
     g_stats.textures++;
@@ -422,6 +423,15 @@ uint32_t view_slot(View* v) {
 
 DkResHandle texture_handle(View* v, Samp* s) {
     const uint32_t image = view_slot(v);
+    // mp2-nx (deko-12 diagnostics): a texture sampled before anything wrote it
+    if (image != swdk::kEmptyImage && v && v->tex && !v->tex->external &&
+        !v->tex->written.load(std::memory_order_relaxed) && !v->tex->warnedUnwritten.exchange(true)) {
+        static int logged = 0;
+        if (logged++ < 60)
+            mp2dk::log("diag: '%s' (%ux%u, %u layers, %u mips, format 0x%X) is sampled before anything wrote it",
+                       v->tex->label.c_str(), v->tex->width, v->tex->height, v->tex->layers, v->tex->mips,
+                       unsigned(v->tex->wformat));
+    }
     const uint32_t sampler = s ? swdk::sampler_slot(s->sampler, s->key) : uint32_t(swdk::kSamplerNearestClamp);
     return dkMakeTextureHandle(image, sampler);
 }
@@ -539,6 +549,9 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
     const uint32_t base = d ? d->baseMipLevel : 0;
     uint32_t count = d && d->mipLevelCount != WGPU_MIP_LEVEL_COUNT_UNDEFINED ? d->mipLevelCount : t->mips - base;
     count = std::min(count, t->mips > base ? t->mips - base : 1u);
+    // mp2-nx (deko-12 A/B, deko3d_env.txt MP2DK_MIP0=1): sampled views see only their first level
+    static const bool kMip0 = swdk::env_flag("MP2DK_MIP0", false);
+    if (kMip0 && count > 1) count = 1;
     view->baseMip = base;
     view->mipCount = count;
     view->view.mipLevelOffset = uint8_t(base);
@@ -550,14 +563,22 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
     // mp2-nx (deko-11): the view's type is the view dimension, not the image's. The shader's sampler type
     // follows the view (a cube probe is a 6-layer 2D texture viewed as a cube; the VFX path views a
     // one-layer 2D texture as a 2D array), and a descriptor of another type samples nothing sensible.
-    if (d && t->layers > 1 && !t->is3d && d->baseArrayLayer < t->layers) {
+    // (MP2DK_OLD_VIEWS=1 in deko3d_env.txt: deko-10's handling, for an A/B test)
+    static const bool kOldViews = swdk::env_flag("MP2DK_OLD_VIEWS", false);
+    if (kOldViews) {
+        if (d && d->arrayLayerCount != WGPU_ARRAY_LAYER_COUNT_UNDEFINED && t->layers > 1) {
+            view->view.layerOffset = uint16_t(d->baseArrayLayer);
+            view->view.layerCount = uint16_t(d->arrayLayerCount);
+            if (d->dimension == WGPUTextureViewDimension_2D) view->view.type = DkImageType_2D;
+        }
+    } else if (d && t->layers > 1 && !t->is3d && d->baseArrayLayer < t->layers) {
         view->view.layerOffset = uint16_t(d->baseArrayLayer);
         const uint32_t left = t->layers - d->baseArrayLayer;
         view->view.layerCount = uint16_t(d->arrayLayerCount != WGPU_ARRAY_LAYER_COUNT_UNDEFINED
                                              ? std::min(d->arrayLayerCount, left)
                                              : left);
     }
-    if (d && t->valid) {
+    if (d && t->valid && !kOldViews) {
         switch (d->dimension) {
         case WGPUTextureViewDimension_2D: view->view.type = DkImageType_2D; break;
         case WGPUTextureViewDimension_2DArray: view->view.type = DkImageType_2DArray; break;

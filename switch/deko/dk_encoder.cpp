@@ -334,6 +334,15 @@ void bad_copy(const char* what, uint64_t need, uint64_t size) {
 }
 
 
+// mp2-nx (deko-12 diagnostics): a copy into or out of a texture dropped before it reached deko3d
+void dropped_copy(const char* what, const Tex* t, uint32_t mip, WGPUOrigin3D o, WGPUExtent3D e) {
+    static int logged = 0;
+    if (logged++ < 40)
+        log("diag: %s dropped: '%s' (%ux%u, %u mips) level %u at %u,%u,%u size %ux%ux%u", what,
+            t ? t->label.c_str() : "?", t ? t->width : 0, t ? t->height : 0, t ? t->mips : 0, mip, o.x, o.y, o.z,
+            e.width, e.height, e.depthOrArrayLayers);
+}
+
 bool is_int_format(WGPUTextureFormat f) {
     switch (f) {
     case WGPUTextureFormat_R8Uint: case WGPUTextureFormat_R8Sint: case WGPUTextureFormat_R16Uint:
@@ -351,15 +360,23 @@ bool is_int_format(WGPUTextureFormat f) {
 
 void copy_image(Replay& r, Tex* src, uint32_t srcMip, WGPUOrigin3D so, Tex* dst, uint32_t dstMip, WGPUOrigin3D dO,
                 WGPUExtent3D e) {
-    if (!src || !dst || !src->valid || !dst->valid) return;
+    if (!src || !dst || !src->valid || !dst->valid) {
+        dropped_copy("a texture copy (an invalid texture)", dst, dstMip, dO, e);
+        return;
+    }
     uint32_t w = e.width, h = e.height;
     const uint32_t sw = level_size(src->width, srcMip), shh = level_size(src->height, srcMip);
     const uint32_t dw = level_size(dst->width, dstMip), dh = level_size(dst->height, dstMip);
     uint32_t sx = so.x, sy = so.y, dx = dO.x, dy = dO.y;
-    if (sx >= sw || sy >= shh || dx >= dw || dy >= dh) return;
+    if (sx >= sw || sy >= shh || dx >= dw || dy >= dh) {
+        dropped_copy("a texture copy (outside the level)", dst, dstMip, dO, e);
+        return;
+    }
     w = std::min({w, sw - sx, dw - dx});
     h = std::min({h, shh - sy, dh - dy});
     if (w == 0 || h == 0) return;
+    if (dst->depth != src->depth) dropped_copy("note: a copy between depth and colour", dst, dstMip, dO, e);
+    dst->written = true;
     if (src->compressed) {
         w = (w + src->blockW - 1) / src->blockW;
         h = (h + src->blockH - 1) / src->blockH;
@@ -378,11 +395,18 @@ void copy_image(Replay& r, Tex* src, uint32_t srcMip, WGPUOrigin3D so, Tex* dst,
 
 void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows, Tex* t, uint32_t mip, WGPUOrigin3D o,
                      WGPUExtent3D e) {
-    if (!t || !t->valid || mip >= t->mips) return;
+    if (!t || !t->valid || mip >= t->mips) {
+        dropped_copy("an upload (an invalid texture or level)", t, mip, o, e);
+        return;
+    }
     const uint32_t lw = level_size(t->width, mip), lh = level_size(t->height, mip);
-    if (o.x >= lw || o.y >= lh) return;
+    if (o.x >= lw || o.y >= lh || o.z >= (t->is3d ? level_size(t->layers, mip) : t->layers)) {
+        dropped_copy("an upload (outside the level)", t, mip, o, e);
+        return;
+    }
     const uint32_t w = std::min(e.width, lw - o.x), h = std::min(e.height, lh - o.y);
     if (w == 0 || h == 0) return;
+    if (src != g_zero.gpu) t->written = true;
     transfer_begin(r);
     const DkCopyBuf buf = {src, rowBytes, rowBytes * std::max(rows, 1u)};
     const DkImageView view = level_view(t, mip);
@@ -466,6 +490,7 @@ void begin_pass(Replay& r, const PassDesc& p) {
             colors[i].pImage = &v->tex->image;
             colors[i].mipLevelCount = 1;
             colorPtrs[i] = &colors[i];
+            v->tex->written = true;
             if (!r.width) {
                 r.width = level_size(v->tex->width, v->baseMip);
                 r.height = level_size(v->tex->height, v->baseMip);
@@ -480,6 +505,7 @@ void begin_pass(Replay& r, const PassDesc& p) {
         depth.pImage = &p.depth->tex->image;
         depth.mipLevelCount = 1;
         depthPtr = &depth;
+        p.depth->tex->written = true;
         if (!r.width) {
             r.width = level_size(p.depth->tex->width, p.depth->baseMip);
             r.height = level_size(p.depth->tex->height, p.depth->baseMip);
@@ -749,6 +775,8 @@ void replay(Replay& r, Enc* e) {
 // empty lightmap or a target first loaded, showed whatever an earlier texture left in that memory).
 // Depth and stencil textures are left out: their passes clear them.
 void zero_texture(Replay& r, Tex* t) {
+    static const bool kNoZero = swdk::env_flag("MP2DK_NO_ZERO", false);  // deko3d_env.txt A/B
+    if (kNoZero) return;
     if (!g_zero || !t || !t->valid || t->external || t->depth) return;
     for (uint32_t m = 0; m < t->mips; m++) {
         const uint32_t lw = level_size(t->width, m), lh = level_size(t->height, m);

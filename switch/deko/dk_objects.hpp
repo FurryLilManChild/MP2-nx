@@ -54,6 +54,10 @@ struct Tex {
     bool depth = false, compressed = false, valid = false;
     bool external = false;  // mp2-nx: the image is a swapchain image (not ours to free)
     bool is3d = false;      // mp2-nx (deko-11): a 3D texture (its depth is not layers)
+    // mp2-nx (deko-12 diagnostics): set by the first upload, copy or pass that writes it; a texture
+    // sampled before that is logged once (dk_objects.cpp texture_handle)
+    std::atomic<bool> written{false};
+    std::atomic<bool> warnedUnwritten{false};
     uint8_t blockW = 1, blockH = 1, blockBytes = 4;
     DkImage image{};
     swdk::ImageAlloc mem;
