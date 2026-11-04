@@ -1,57 +1,7 @@
-diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..8f8621015 100644
---- a/CMakeLists.txt
-+++ b/CMakeLists.txt
-@@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
-         # the whole point is naming the function that faulted. This is the only place it is
-         # needed: the decomp build links no platform code and the gate's port build inherits
-         # it from here. Android has no `execinfo`/`backtrace`, so it is desktop-only.
--        target_link_options(metroid_prime2_port PRIVATE -rdynamic)
-+        if(NOT CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-+            target_link_options(metroid_prime2_port PRIVATE -rdynamic)
-+        endif()
-     endif()
- elseif(APPLE)
-     # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,34 @@ if(NOT ANDROID AND NOT IOS)
-             DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
-     endif()
- endif()
-+
-+# mp2-nx: the Nintendo Switch build (https://github.com/FurryLilManChild/mp2-nx). Its
-+# dependencies are decided by switch/cmake/mp2_switch_deps.cmake, injected ahead of this
-+# file; here the Horizon start-up, the low-address REL arena and the NRO are added.
-+if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
-+    # The POSIX crash reporter is replaced by a Horizon one with the same API.
-+    get_target_property(_mp2nx_audio_sources mp_port_audio SOURCES)
-+    list(REMOVE_ITEM _mp2nx_audio_sources platform/port_crash.cpp)
-+    set_property(TARGET mp_port_audio PROPERTY SOURCES ${_mp2nx_audio_sources})
-+    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/platform/port_crash_switch.cpp)
-+    target_sources(metroid_prime2_port PRIVATE
-+        ${MP2NX_ROOT}/switch/source/platform/startup.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/pthread_wrap.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/sqlite_switch.cpp)
-+    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
-+    target_link_options(metroid_prime2_port PRIVATE
-+        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create)
-+    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
-+    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
-+    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
-+    set_source_files_properties(platform/port_console.cpp PROPERTIES COMPILE_OPTIONS "-include;arpa/inet.h")
-+    # SQLite: no mmap or shared-memory WAL on Horizon, and no extension loading.
-+    if(TARGET sqlite3)
-+        target_compile_definitions(sqlite3 PRIVATE SQLITE_OMIT_WAL=1 SQLITE_MAX_MMAP_SIZE=0
-+            SQLITE_OMIT_LOAD_EXTENSION=1)
-+    endif()
-+    nx_generate_nacp(mp2-nx.nacp NAME "Metroid Prime 2: Echoes" AUTHOR "mp2-nx" VERSION "0.1.0")
-+    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
-+endif()
-diff --git a/extern/aurora/lib/dawn/BackendBinding.cpp b/extern/aurora/lib/dawn/BackendBinding.cpp
+diff --git a/lib/dawn/BackendBinding.cpp b/lib/dawn/BackendBinding.cpp
 index 5506949ce..5422ad727 100644
---- a/extern/aurora/lib/dawn/BackendBinding.cpp
-+++ b/extern/aurora/lib/dawn/BackendBinding.cpp
+--- a/lib/dawn/BackendBinding.cpp
++++ b/lib/dawn/BackendBinding.cpp
 @@ -1,3 +1,6 @@
 +#if defined(__SWITCH__)
 +#include <switch.h>
@@ -72,10 +22,10 @@ index 5506949ce..5422ad727 100644
    return std::move(desc);
  #elif defined(SDL_PLATFORM_LINUX)
    const char* driver = SDL_GetCurrentVideoDriver();
-diff --git a/extern/aurora/lib/gfx/frame.hpp b/extern/aurora/lib/gfx/frame.hpp
+diff --git a/lib/gfx/frame.hpp b/lib/gfx/frame.hpp
 index de8c3f93c..f02a1d834 100644
---- a/extern/aurora/lib/gfx/frame.hpp
-+++ b/extern/aurora/lib/gfx/frame.hpp
+--- a/lib/gfx/frame.hpp
++++ b/lib/gfx/frame.hpp
 @@ -7,8 +7,20 @@
  
  namespace aurora::gfx::detail {
@@ -97,10 +47,10 @@ index de8c3f93c..f02a1d834 100644
  
  const wgpu::Buffer& staging_buffer(size_t slot);
  
-diff --git a/extern/aurora/lib/gfx/pipeline_cache.cpp b/extern/aurora/lib/gfx/pipeline_cache.cpp
+diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
 index dfbba6023..0d9a1ce86 100644
---- a/extern/aurora/lib/gfx/pipeline_cache.cpp
-+++ b/extern/aurora/lib/gfx/pipeline_cache.cpp
+--- a/lib/gfx/pipeline_cache.cpp
++++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
  #include "pipeline_cache.hpp"
 +#include "../thread.hpp"
@@ -161,10 +111,10 @@ index dfbba6023..0d9a1ce86 100644
    }
    g_hasPipelineThread = false;
  
-diff --git a/extern/aurora/lib/gx/fifo.cpp b/extern/aurora/lib/gx/fifo.cpp
+diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
 index efddaaf2a..f667bc960 100644
---- a/extern/aurora/lib/gx/fifo.cpp
-+++ b/extern/aurora/lib/gx/fifo.cpp
+--- a/lib/gx/fifo.cpp
++++ b/lib/gx/fifo.cpp
 @@ -195,7 +195,11 @@ void start_worker() {
    }
    sWorkerThread = thread::Thread{{
@@ -177,10 +127,10 @@ index efddaaf2a..f667bc960 100644
                                   },
                                   worker_main};
  }
-diff --git a/extern/aurora/lib/input.cpp b/extern/aurora/lib/input.cpp
+diff --git a/lib/input.cpp b/lib/input.cpp
 index adb5c1f57..7fa852747 100644
---- a/extern/aurora/lib/input.cpp
-+++ b/extern/aurora/lib/input.cpp
+--- a/lib/input.cpp
++++ b/lib/input.cpp
 @@ -457,7 +457,18 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
        controller.m_deadZones.emulateTriggers = false;
      }
@@ -200,10 +150,10 @@ index adb5c1f57..7fa852747 100644
      controller.m_hasRgbLed = SDL_GetBooleanProperty(props, SDL_PROP_GAMEPAD_CAP_RGB_LED_BOOLEAN, false);
      SDL_JoystickID instance = SDL_GetJoystickID(SDL_GetGamepadJoystick(ctrl));
      g_GameControllers[instance] = controller;
-diff --git a/extern/aurora/lib/io.cpp b/extern/aurora/lib/io.cpp
+diff --git a/lib/io.cpp b/lib/io.cpp
 index 8915a406a..b9815d1c7 100644
---- a/extern/aurora/lib/io.cpp
-+++ b/extern/aurora/lib/io.cpp
+--- a/lib/io.cpp
++++ b/lib/io.cpp
 @@ -1,3 +1,4 @@
 +#include <cstdio>
  #include "io.hpp"
@@ -242,10 +192,10 @@ index 8915a406a..b9815d1c7 100644
  
    m_temporaryPath.clear();
    m_targetPath.clear();
-diff --git a/extern/aurora/lib/thread.cpp b/extern/aurora/lib/thread.cpp
+diff --git a/lib/thread.cpp b/lib/thread.cpp
 index 348b0ec45..811d1b1d6 100644
---- a/extern/aurora/lib/thread.cpp
-+++ b/extern/aurora/lib/thread.cpp
+--- a/lib/thread.cpp
++++ b/lib/thread.cpp
 @@ -8,6 +8,7 @@
  #include <cstdint>
  #include <fstream>
@@ -368,10 +318,10 @@ index 348b0ec45..811d1b1d6 100644
 +#endif
 +
  } // namespace aurora::thread
-diff --git a/extern/aurora/lib/thread.hpp b/extern/aurora/lib/thread.hpp
+diff --git a/lib/thread.hpp b/lib/thread.hpp
 index 0c65cc1be..0b8a7f239 100644
---- a/extern/aurora/lib/thread.hpp
-+++ b/extern/aurora/lib/thread.hpp
+--- a/lib/thread.hpp
++++ b/lib/thread.hpp
 @@ -1,6 +1,7 @@
  #pragma once
  
@@ -429,10 +379,10 @@ index 0c65cc1be..0b8a7f239 100644
  class Thread {
  public:
    Thread() noexcept = default;
-diff --git a/extern/aurora/lib/window.cpp b/extern/aurora/lib/window.cpp
+diff --git a/lib/window.cpp b/lib/window.cpp
 index 63774af8b..bd994b1f7 100644
---- a/extern/aurora/lib/window.cpp
-+++ b/extern/aurora/lib/window.cpp
+--- a/lib/window.cpp
++++ b/lib/window.cpp
 @@ -21,6 +21,9 @@
  #include <SDL3/SDL_stdinc.h>
  #include <SDL3/SDL_pixels.h>
@@ -510,66 +460,3 @@ index 63774af8b..bd994b1f7 100644
  
    const float scale = SDL_GetWindowDisplayScale(g_window);
    return {
-diff --git a/platform/rel.cpp b/platform/rel.cpp
-index f4ff077ce..298a34ddb 100644
---- a/platform/rel.cpp
-+++ b/platform/rel.cpp
-@@ -7,8 +7,10 @@
- #if defined(_WIN32)
- #include <windows.h>
- #else
-+#if !defined(__SWITCH__)
- #include <sys/mman.h>
- #endif
-+#endif
- 
- namespace port {
- namespace rel {
-@@ -380,6 +382,11 @@ static uintptr_t FindArenaGapBelow4GiB(size_t size) {
- }
- #endif
- 
-+#if defined(__SWITCH__)
-+extern "C" void* mp2nx_low_arena_alloc(size_t size, uint32_t preferredBase);
-+extern "C" void mp2nx_low_arena_free(void* base);
-+#endif
-+
- GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
-   if (size == 0) {
-     return;
-@@ -389,7 +396,10 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
-   // say why it failed without changing what any other path prints.
-   bool portableFallback = false;
- 
--#if defined(_WIN32)
-+#if defined(__SWITCH__)
-+  // mp2-nx: Horizon has no mmap; switch/source/platform/low_arena.cpp maps heap pages below 4 GiB.
-+  void* base = mp2nx_low_arena_alloc(size, preferredBase);
-+#elif defined(_WIN32)
-   void* base = preferredBase != 0
-                    ? VirtualAlloc(reinterpret_cast<void*>(static_cast<uintptr_t>(preferredBase)), size,
-                                   MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)
-@@ -456,7 +466,11 @@ GuestArena::GuestArena(size_t size, uint32_t preferredBase) {
-                    "metroid_prime2_port: no REL arena: could not map %zu bytes below 4 GiB (%s)\n",
-                    size, base == nullptr ? "no addressable low mapping" : "the mapping landed too high");
-     }
--#if defined(_WIN32)
-+#if defined(__SWITCH__)
-+    if (base != nullptr) {
-+      mp2nx_low_arena_free(base);
-+    }
-+#elif defined(_WIN32)
-     if (base != nullptr) {
-       VirtualFree(base, 0, MEM_RELEASE);
-     }
-@@ -476,7 +490,9 @@ GuestArena::~GuestArena() {
-   if (m_base == nullptr) {
-     return;
-   }
--#if defined(_WIN32)
-+#if defined(__SWITCH__)
-+  mp2nx_low_arena_free(m_base);
-+#elif defined(_WIN32)
-   VirtualFree(m_base, 0, MEM_RELEASE);
- #else
-   munmap(m_base, m_size);
