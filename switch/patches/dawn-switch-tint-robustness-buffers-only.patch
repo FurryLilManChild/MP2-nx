@@ -1,0 +1,41 @@
+Switch (deko3d): a Tint GLSL option for robustness on buffers and immediates only
+
+mp2-nx deko-8: with robustness on, every shader that loads a texel failed to translate ("texture missing
+from texture_builtins_from_uniform list"): texture clamping calls textureNumLevels, which the GLSL writer
+reads from a uniform buffer. Options::robustness_skip_textures (default false) leaves textures out of
+the Robustness transform; switch/deko/shader_translate.cpp sets it.
+
+diff --git a/src/tint/lang/glsl/writer/common/options.h b/src/tint/lang/glsl/writer/common/options.h
+--- a/src/tint/lang/glsl/writer/common/options.h	2026-11-04 14:56:27.521584186 -0500
++++ b/src/tint/lang/glsl/writer/common/options.h	2026-11-04 14:56:27.507026229 -0500
+@@ -166,6 +166,11 @@
+     /// Set to `true` to enable integer range analysis in robustness transform.
+     bool disable_integer_range_analysis = false;
+ 
++    /// Switch (deko3d): robustness for buffers and immediates only. Texture coordinate clamping needs
++    /// textureNumLevels, which the GLSL writer reads from a uniform buffer the deko3d renderer does not
++    /// provide; out-of-range texel fetches are the hardware's to handle.
++    bool robustness_skip_textures = false;
++
+     /// Set to `true` to disable workgroup memory zero initialization
+     bool disable_workgroup_init = false;
+ 
+@@ -238,6 +243,7 @@
+                  strip_all_names,
+                  disable_robustness,
+                  disable_integer_range_analysis,
++                 robustness_skip_textures,
+                  disable_workgroup_init,
+                  disable_polyfill_integer_div_mod,
+                  use_array_length_from_uniform,
+diff --git a/src/tint/lang/glsl/writer/raise/raise.cc b/src/tint/lang/glsl/writer/raise/raise.cc
+--- a/src/tint/lang/glsl/writer/raise/raise.cc	2026-11-04 14:56:27.521683450 -0500
++++ b/src/tint/lang/glsl/writer/raise/raise.cc	2026-11-04 14:56:27.508762923 -0500
+@@ -83,6 +83,7 @@
+     if (!options.disable_robustness) {
+         core::ir::transform::RobustnessConfig config{};
+         config.use_integer_range_analysis = !options.disable_integer_range_analysis;
++        config.clamp_texture = !options.robustness_skip_textures;
+         TINT_CHECK_RESULT(core::ir::transform::Robustness(module, config));
+ 
+         TINT_CHECK_RESULT(core::ir::transform::PreventInfiniteLoops(module));

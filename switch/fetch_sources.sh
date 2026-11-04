@@ -47,6 +47,7 @@ gitpin switchwaker https://github.com/centollOS/SwitchWaker 084291f791d40b0ce2d3
 if [ ! -e dawn/.mp2nx-tint-patched ]; then
   git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-depth-zero-to-one.patch"
   git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-position-y-up.patch"
+  git -C dawn apply "$(dirname "${BASH_SOURCE[0]}")/patches/dawn-switch-tint-robustness-buffers-only.patch"
   touch dawn/.mp2nx-tint-patched
 fi
 echo "sources ready in $DEPS"

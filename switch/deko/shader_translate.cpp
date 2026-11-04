@@ -79,6 +79,7 @@ TranslateResult wgsl_to_glsl(const std::string& wgsl, const std::string& entryPo
     // SPIR-V keeps it); without it an index past a storage buffer wrote over the heap the deko3d memory
     // blocks live in
     options.disable_robustness = false;
+    options.robustness_skip_textures = true;  // (dawn-switch-tint-robustness-buffers-only.patch)
     options.depth_zero_to_one = true;
     options.disable_position_y_negation = true;
     options.use_uniform_buffers = true;
