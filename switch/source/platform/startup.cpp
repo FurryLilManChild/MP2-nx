@@ -141,9 +141,9 @@ extern "C" void userAppInit(void) {
   }
 
   mp2nx_sqlite_setup();
-  // The console's audio renderer crackles at SDL's default buffer size (Dusklight
-  // DuskAudioSystem.cpp:92); SDL reads its hints from the environment too.
-  setenv("SDL_AUDIO_DEVICE_SAMPLE_FRAMES", "4096", 0);
+  // Not SDL_AUDIO_DEVICE_SAMPLE_FRAMES=4096 (Dusklight's crackle fix): Echoes keeps only 64 ms
+  // queued (platform/ai_dma.cpp kTargetQueuedBytes) and a 4096-frame device pull is about 85 ms,
+  // so it ran dry on every pull (test6c: choppy audio throughout).
 
   mkdir(MP2NX_DIR "/user", 0777);
   mkdir(MP2NX_DIR "/cache", 0777);

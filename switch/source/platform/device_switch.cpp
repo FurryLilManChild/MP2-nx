@@ -133,15 +133,18 @@ bool read_motion(float gyro[3], float accel[3]) {
   }
   constexpr float kRevToRad = 6.28318530717958647692f;
   constexpr float kG = 9.80665f;
+  // test6c on hardware: pitch right, left/right turning reversed. libnx's frame is SDL's turned
+  // 180 degrees about x, so y and z are negated (both, for gyro and accel alike: flipping one
+  // axis alone would mirror the frame, which breaks Echoes' gravity-based gyro space).
   if (gyro != nullptr) {
     gyro[0] = state.angular_velocity.x * kRevToRad;
-    gyro[1] = state.angular_velocity.y * kRevToRad;
-    gyro[2] = state.angular_velocity.z * kRevToRad;
+    gyro[1] = -state.angular_velocity.y * kRevToRad;
+    gyro[2] = -state.angular_velocity.z * kRevToRad;
   }
   if (accel != nullptr) {
     accel[0] = state.acceleration.x * kG;
-    accel[1] = state.acceleration.y * kG;
-    accel[2] = state.acceleration.z * kG;
+    accel[1] = -state.acceleration.y * kG;
+    accel[2] = -state.acceleration.z * kG;
   }
   return true;
 }

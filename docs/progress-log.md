@@ -2,6 +2,18 @@
 
 Newest first.
 
+## 2026-11-03: test6c result, test6d
+
+- Test6c (the owner): rumble works, gyro aim works but left/right is reversed, Exit game returns to HOME cleanly (the
+  test6 AM exit works). Regression: audio choppy throughout.
+- Audio cause: test6's `SDL_AUDIO_DEVICE_SAMPLE_FRAMES=4096` (Dusklight's crackle fix). Echoes keeps only 64 ms
+  queued (platform/ai_dma.cpp kTargetQueuedBytes, 32 kHz) and a 4096-frame device pull is about 85 ms, so every pull
+  ran it dry. Removed; audio is as in test5. Lesson: check how this game feeds a subsystem before copying a tuning.
+- Gyro: libnx's frame is SDL's turned 180 degrees about x; y and z negated for gyro and accel (one axis alone would
+  mirror the frame and break the gravity-based gyro space).
+- Also seen in the test6c memory log: textures climbed to 1529 (836 MiB) and free heap to 490 MiB before falling back
+  (the trim and Aurora's texture eviction). The per-frame 320x224/320x184 uploads are the likely source; a test7 item.
+
 ## 2026-11-03: test6c, Exit game
 
 Test6b plus an "Exit game" row on the Switch menu's Game page (A twice), the F1 window's path: save settings, push
