@@ -12,6 +12,7 @@
 // or hung the last time) skips the test and says so.
 #include "shader_translate.h"
 #include "uam_api.h"
+#include "../../include/mp2nx_app.h"
 
 #include <deko3d.h>
 #include <switch.h>
@@ -34,7 +35,7 @@ extern void (*g_mp2nxShaderTap)(const std::string& wgsl);  // gx/shader.cpp (mp2
 
 namespace {
 
-constexpr const char* kMarker = "sdmc:/switch/mp2-nx/deko3d_test_running";
+constexpr const char* kMarker = MP2NX_APP_DIR "/deko3d_test_running";
 constexpr int kMaxGxShaders = 40;
 constexpr uint32_t kCodeSize = 8u << 20;
 

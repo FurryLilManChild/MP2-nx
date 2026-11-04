@@ -57,6 +57,10 @@ endif()
 # nod is Rust; Horizon builds no Rust. Alek's shim implements nod's C entry points over
 # iso/gcm and, through disc_container.cpp, rvz/wia/gcz (CC0, from the Twilight Princess
 # Switch port). Aurora skips its own nod provider when nod::nod already exists.
+# The app's name: the NRO, its title and its SD folder (switch/include/mp2nx_app.h). "mp2-nx" for releases;
+# the deko3d test builds use "mp2-nx-deko" so both fit on one SD card, each with its own logs, saves and caches.
+set(MP2NX_APP_NAME "mp2-nx" CACHE STRING "the NRO and SD folder name (sdmc:/switch/<name>/)")
+# (set only on the targets that use it, so a name change rebuilds those and not the whole game)
 set(_mp2nx_disc "${MP2NX_ROOT}/switch/source/disc")
 add_library(mp2nx_nod STATIC
   ${_mp2nx_disc}/iso_nod_shim.cpp
@@ -67,7 +71,7 @@ add_library(mp2nx_nod STATIC
 target_include_directories(mp2nx_nod
   PUBLIC "${MP2NX_ROOT}/switch/third_party/nod-c"
   PRIVATE "${MP2NX_ROOT}/switch/include" "${DEVKITPRO}/portlibs/switch/include")
-target_compile_definitions(mp2nx_nod PRIVATE DUSK_WII_KEY_DIR="sdmc:/switch/mp2-nx")
+target_compile_definitions(mp2nx_nod PRIVATE DUSK_WII_KEY_DIR="sdmc:/switch/${MP2NX_APP_NAME}")
 target_compile_features(mp2nx_nod PUBLIC cxx_std_20)
 # Created before the platform module turns PIC on for new targets; the NRO is a PIE, and
 # position-dependent tables in .rodata would need relocating at run time.

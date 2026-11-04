@@ -300,7 +300,7 @@ NodResult nod_disc_open_stream(const NodDiscStream* stream, const NodDiscOptions
     if (dusk::sw::disc::is_wii_disc(*disc->container)) {
         dusk::sw::disc::WiiKeys keys;
 #ifdef __SWITCH__
-        const std::string keyDir = "sdmc:/switch/mp2-nx";  // mp2-nx: the app folder
+        const std::string keyDir = DUSK_WII_KEY_DIR;  // mp2-nx: the app folder (mp2_switch_deps.cmake)
 #else
         const char* env = std::getenv("DUSK_WII_KEY_DIR");
         const std::string keyDir = env != nullptr ? env : ".";

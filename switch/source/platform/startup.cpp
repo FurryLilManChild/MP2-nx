@@ -16,7 +16,8 @@
 #include <cstring>
 #include <string>
 
-#define MP2NX_DIR "sdmc:/switch/mp2-nx"
+#include "../../include/mp2nx_app.h"
+#define MP2NX_DIR MP2NX_APP_DIR
 
 // SQLite for the pipeline and Dawn caches on Horizon (sqlite_switch.cpp).
 extern "C" void mp2nx_sqlite_setup(void);
@@ -84,16 +85,16 @@ bool has_suffix(const char* name, const char* suffix) {
 }
 
 // The disc image in the app folder: an .iso or .gcm first, then .rvz, .wia, .gcz, .ciso.
-std::string find_disc() {
+std::string find_disc_in(const char* folder) {
   static const char* const kOrder[] = {".iso", ".gcm", ".rvz", ".wia", ".gcz", ".ciso"};
   for (const char* ext : kOrder) {
-    DIR* dir = opendir(MP2NX_DIR);
+    DIR* dir = opendir(folder);
     if (dir == nullptr) {
       return {};
     }
     while (dirent* e = readdir(dir)) {
       if (e->d_name[0] != '.' && has_suffix(e->d_name, ext)) {
-        std::string path = std::string{MP2NX_DIR "/"} + e->d_name;
+        std::string path = std::string{folder} + "/" + e->d_name;
         closedir(dir);
         return path;
       }
@@ -101,6 +102,16 @@ std::string find_disc() {
     closedir(dir);
   }
   return {};
+}
+
+// The app's own folder first; a test build (MP2NX_APP_NAME other than mp2-nx) then uses the release's
+// disc, so it needs no second copy on the SD card.
+std::string find_disc() {
+  std::string disc = find_disc_in(MP2NX_DIR);
+  if (disc.empty() && std::strcmp(MP2NX_DIR, MP2NX_MAIN_DIR) != 0) {
+    disc = find_disc_in(MP2NX_MAIN_DIR);
+  }
+  return disc;
 }
 
 void show_message_and_exit(const char* text) {
@@ -138,7 +149,7 @@ extern "C" void userAppInit(void) {
     show_message_and_exit(
         "  This needs the memory of a full application.\n"
         "  Start it with title takeover: hold R while opening any game\n"
-        "  from the HOME menu, then pick mp2-nx. Not from the Album.");
+        "  from the HOME menu, then pick " MP2NX_APP_NAME ". Not from the Album.");
   }
 
   mp2nx_sqlite_setup();
@@ -160,7 +171,7 @@ extern "C" void userAppInit(void) {
     show_message_and_exit(
         "  No disc image found.\n"
         "  Copy your Metroid Prime 2: Echoes (USA) image (.iso or .rvz)\n"
-        "  into sdmc:/switch/mp2-nx/ next to mp2-nx.nro.");
+        "  into " MP2NX_DIR "/ next to " MP2NX_APP_NAME ".nro.");
   }
   setenv("MP2_DISC", disc.c_str(), 1);
   std::printf("mp2-nx: disc %s\n", disc.c_str());
@@ -266,7 +277,7 @@ extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
 
   FsFileSystem* sd = fsdevGetDeviceFileSystem("sdmc");
   if (sd != nullptr) {
-    static char path[FS_MAX_PATH] = "/switch/mp2-nx/logs/crash.txt";
+    static char path[FS_MAX_PATH] = "/switch/" MP2NX_APP_NAME "/logs/crash.txt";
     fsFsDeleteFile(sd, path);
     fsFsCreateFile(sd, path, 0, 0);
     FsFile f;

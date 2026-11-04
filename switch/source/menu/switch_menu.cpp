@@ -6,6 +6,7 @@
 // window does (port_overlay.cpp's variables and setters), so they are saved to the same
 // settings.cfg, and adds what the Switch needs: save states, a resolution for handheld and one
 // for docked (applied when the console changes mode), and an FPS counter.
+#include "../../include/mp2nx_app.h"
 #include "debug_ui_internal.h"
 
 #include "port_input_devices.h"
@@ -44,7 +45,7 @@ namespace PortDebug::SwitchMenu {
 namespace {
 
 // ---- Our own settings (the F1 window has no per-mode resolution or FPS counter) ----
-constexpr const char* kConfigPath = "sdmc:/switch/mp2-nx/switch_menu.cfg";
+constexpr const char* kConfigPath = MP2NX_APP_DIR "/switch_menu.cfg";
 // Render scale per mode: 0 = the screen's own resolution, else a multiple of 480 lines.
 float sHandheldScale = 0.f;
 float sDockedScale = 0.f;
@@ -789,7 +790,7 @@ std::vector< Row > BuildRows(int page) {
                     },
                     nullptr});
 #endif
-    rows.push_back({"mp2-nx", "Echoes Unbound on Switch", "", nullptr, nullptr, false});
+    rows.push_back({MP2NX_APP_NAME, "Echoes Unbound on Switch", "", nullptr, nullptr, false});
     break;
   }
   }

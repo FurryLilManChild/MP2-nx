@@ -9,7 +9,13 @@
 #   Tint's GLSL writer: built with Dawn by switch/build_deps.sh (TINT_BUILD_GLSL_WRITER=ON, the two
 #     dawn-switch-tint-*.patch options), its archives in $MP2NX_PREFIX/lib/tint
 #   switch/deko/shader_translate.cpp: SwitchWaker's WGSL -> GLSL translation (MIT, via Alek)
-option(MP2NX_DEKO3D "link the deko3d toolchain and its smoke test (phase 0)" ON)
+# On by default in the deko3d test builds (MP2NX_APP_NAME other than mp2-nx), off for releases.
+if(MP2NX_APP_NAME STREQUAL "mp2-nx")
+  set(_dk_default OFF)
+else()
+  set(_dk_default ON)
+endif()
+option(MP2NX_DEKO3D "link the deko3d toolchain and its smoke test (phase 0)" ${_dk_default})
 if(NOT MP2NX_DEKO3D)
   return()
 endif()
@@ -59,6 +65,7 @@ target_compile_definitions(mp2nx_deko PRIVATE TINT_BUILD_GLSL_WRITER=1 TINT_BUIL
   TINT_BUILD_MSL_WRITER=0 TINT_BUILD_GLSL_VALIDATOR=0 TINT_BUILD_NULL_WRITER=1 TINT_BUILD_IR_BINARY=0
   TINT_BUILD_TINTD=0 TINT_BUILD_IS_LINUX=0 TINT_BUILD_IS_MAC=0 TINT_BUILD_IS_WIN=0)
 set_target_properties(mp2nx_deko PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+target_compile_definitions(mp2nx_deko PRIVATE "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"")
 add_dependencies(mp2nx_deko mp2nx_uam_renamed)
 # Tint's archives also carry objects the monolithic Dawn has (the same build): one group, rescanned
 target_link_libraries(mp2nx_deko PUBLIC mp2nx_uam deko3d_release "$<LINK_GROUP:RESCAN,${_dk_tint_libs}>")
