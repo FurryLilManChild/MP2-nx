@@ -151,7 +151,9 @@ TranslateResult wgsl_to_glsl(const std::string& wgsl, const std::string& entryPo
         options.sampler_texture_to_name.emplace(
             tint::glsl::writer::CombinedTextureSamplerPair{texRemapped, smpRemapped, false}, name);
         samplerSlots.push_back({name, slot});
-        r.bindings.push_back({SlotBinding::Kind::Sampler, uint8_t(slot), tex.group, tex.binding});
+        const bool noSampler = smp.group == kPlaceholderSamplerGroup;
+        r.bindings.push_back({SlotBinding::Kind::Sampler, uint8_t(slot), tex.group, tex.binding,
+                              uint8_t(noSampler ? 0xFF : smp.group), uint8_t(noSampler ? 0xFF : smp.binding)});
     }
     if (r.immediateSize) {
         r.bindings.push_back({SlotBinding::Kind::Immediates, uint8_t(kImmediatesUboSlot), 0, 0});

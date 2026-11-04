@@ -37,8 +37,11 @@ extern "C" void mp2nx_load_boost(int reason, int on);
 extern "C" void mp2nx_start_log_flusher(void);
 #if MP2NX_DEKO3D
 // switch/source/deko/dk_smoke.cpp: the deko3d phase 0 smoke test
-extern "C" const char* mp2nx_dk_smoke_start(int want);
-extern "C" bool mp2nx_dk_smoke_summary(char* out, size_t size);
+// switch/deko/dk_surface.cpp: the renderer of this start and the choice for the next
+extern "C" bool mp2nx_dk_active(void);
+extern "C" bool mp2nx_dk_fell_back(void);
+extern "C" bool mp2nx_dk_chosen(void);
+extern "C" void mp2nx_dk_set_chosen(bool on);
 #endif
 
 namespace PortDebug::SwitchMenu {
@@ -780,13 +783,13 @@ std::vector< Row > BuildRows(int page) {
     std::snprintf(fps, sizeof(fps), "%.0f", static_cast< double >(sFps));
     rows.push_back({"Frames per second", fps, "", nullptr, nullptr, false});
 #if MP2NX_DEKO3D
-    rows.push_back({"deko3d test (next start)",
-                    sDekoTestThisStart ? "Running now" : (sDekoTest ? "On" : "Off"),
-                    "Tests the new renderer's shader tools once, on the next start. The game still draws with Vulkan",
+    rows.push_back({"Renderer (next start)", mp2nx_dk_chosen() ? "deko3d (test)" : "Vulkan",
+                    mp2nx_dk_active() ? "This start uses deko3d. Vulkan is the safe choice; restart to apply"
+                                      : "deko3d is the new renderer, still being tested. Restart to apply",
                     [](int) {
-                      sDekoTest = !sDekoTest;
-                      SaveConfig();
-                      Toast(sDekoTest ? "Close and restart the game to run the deko3d test" : "deko3d test off");
+                      const bool next = !mp2nx_dk_chosen();
+                      mp2nx_dk_set_chosen(next);
+                      Toast(next ? "Close and restart the game to use deko3d" : "Vulkan on the next start");
                     },
                     nullptr});
 #endif
@@ -829,18 +832,10 @@ void DrawAlways() {
     }
     mp2nx_start_log_flusher(); // misc_switch.cpp
 #if MP2NX_DEKO3D
-    // The test runs on the start after it was asked for, once: the setting is cleared before it runs,
-    // so a crash in it cannot repeat (dk_smoke.cpp also skips it after a start it did not finish).
-    sDekoTestThisStart = sDekoTest;
-    if (sDekoTest) {
-      sDekoTest = false;
-      SaveConfig();
-    }
-    if (const char* msg = mp2nx_dk_smoke_start(sDekoTestThisStart ? 1 : 0)) {
-      sDekoTestThisStart = false;
-      Toast(msg, 6000);
-    } else if (sDekoTestThisStart) {
-      Toast("deko3d test running (about a minute; the game keeps going)", 5000);
+    if (mp2nx_dk_fell_back()) {
+      Toast("deko3d did not show a picture twice, so the game is back on Vulkan", 8000);
+    } else if (mp2nx_dk_active()) {
+      Toast("Renderer: deko3d (test). Switch back in System > Renderer", 6000);
     }
 #endif
   }
@@ -849,14 +844,6 @@ void DrawAlways() {
     return;
   }
   const u64 now = NowMs();
-#if MP2NX_DEKO3D
-  {
-    char summary[256];
-    if (mp2nx_dk_smoke_summary(summary, sizeof(summary))) {
-      Toast(summary, 10000);
-    }
-  }
-#endif
   if (sWatchStateMessage) {
     const std::string msg = PortSaveState::LastMessage();
     if (!msg.empty() && msg != sStateMessageBefore) {

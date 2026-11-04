@@ -832,6 +832,60 @@ index 0c65cc1be..0b8a7f239 100644
  class Thread {
  public:
    Thread() noexcept = default;
+diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
+index a4bd6e697..275065463 100644
+--- a/lib/webgpu/gpu.cpp
++++ b/lib/webgpu/gpu.cpp
+@@ -30,6 +30,13 @@
+ #include "../internal.hpp"
+ #include "../window.hpp"
+ #include "gpu_prof.hpp"
++#if defined(__SWITCH__) && defined(MP2NX_DEKO3D)
++#include "../gx/pipeline.hpp"
++// mp2-nx deko3d renderer (switch/deko/dk_surface.cpp): the run-time choice, the Null device, the set-up
++extern "C" bool mp2nx_dk_choose(void);
++extern "C" bool mp2nx_dk_active(void);
++extern "C" void mp2nx_dk_init(uint32_t gxConfigVersion);
++#endif
+ 
+ #ifdef WEBGPU_DAWN
+ #include "../dawn/TracyPlatform.hpp"
+@@ -994,6 +1001,13 @@ bool surface_window_changed() {
+ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu);
+ 
+ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
++#if defined(__SWITCH__) && defined(MP2NX_DEKO3D)
++  // mp2-nx: deko3d draws under Dawn's Null device (docs/deko3d-phase1-design.md)
++  if (mp2nx_dk_choose()) {
++    auroraBackend = BACKEND_NULL;
++    allowCpu = true;
++  }
++#endif
+   if (initialize_once(auroraBackend, allowCpu)) {
+     return true;
+   }
+@@ -1099,7 +1113,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+         .featureLevel = wgpu::FeatureLevel::Compatibility,
+         .powerPreference = lowPower ? wgpu::PowerPreference::LowPower : wgpu::PowerPreference::HighPerformance,
+         .backendType = backend,
++#if defined(__SWITCH__) && defined(MP2NX_DEKO3D)
++        .compatibleSurface = mp2nx_dk_active() ? nullptr : g_surface,  // (the surface is deko3d's)
++#else
+         .compatibleSurface = g_surface,
++#endif
+     };
+     Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
+              magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
+@@ -1542,6 +1560,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+     g_device.SetLoggingCallback(wgpu_log);
+   }
+   g_queue = g_device.GetQueue();
++#if defined(__SWITCH__) && defined(MP2NX_DEKO3D)
++  if (mp2nx_dk_active()) mp2nx_dk_init(gx::GXPipelineConfigVersion);
++#endif
+ 
+   if (headless()) {
+     // Port: AURORA_HEADLESS: no surface to ask; the framebuffers are made as usual.
 diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
 index d64d2c2f2..d33bc9521 100644
 --- a/lib/webgpu/gpu_cache.cpp

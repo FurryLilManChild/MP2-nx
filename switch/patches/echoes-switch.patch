@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..1371f359c 100644
+index ef1c8c60d..f7c255821 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..1371f359c 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,63 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,64 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -50,6 +50,7 @@ index ef1c8c60d..1371f359c 100644
 +    include(${MP2NX_ROOT}/switch/cmake/mp2_deko3d.cmake)
 +    if(MP2NX_DEKO3D)
 +        target_link_libraries(metroid_prime2_port PRIVATE mp2nx_deko)
++        target_link_options(metroid_prime2_port PRIVATE ${MP2NX_DEKO3D_WRAP_FLAGS})
 +        target_compile_definitions(mp_port_audio PRIVATE MP2NX_DEKO3D=1)
 +    endif()
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME ${MP2NX_APP_NAME})

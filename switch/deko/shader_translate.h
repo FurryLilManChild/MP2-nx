@@ -52,7 +52,7 @@ enum class BindingScheme : uint8_t {
 constexpr uint32_t kImmediatesUboSlot = 15;
 // Changes whenever this file's output for the same input changes (Tint options, post-pass rules):
 // part of the DKSH cache's compiler id.
-constexpr uint32_t kTranslateRevision = 1;
+constexpr uint32_t kTranslateRevision = 2;  // mp2-nx: 2 (sampler bindings recorded)
 
 struct SlotBinding {
     enum class Kind : uint8_t { Uniform, Storage, Sampler, Immediates };
@@ -61,6 +61,9 @@ struct SlotBinding {
     // WGSL binding point (for a combined sampler: the texture's); Immediates: 0, 0
     uint32_t group = 0;
     uint32_t binding = 0;
+    // mp2-nx: a combined sampler's sampler binding (0xFF, 0xFF: none, a textureLoad)
+    uint8_t samplerGroup = 0xFF;
+    uint8_t samplerBinding = 0xFF;
 };
 
 struct TranslateResult {

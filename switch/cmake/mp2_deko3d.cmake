@@ -1,6 +1,6 @@
-# mp2-nx deko3d phase 0 (docs/deko3d-plan.md): the toolchain the deko3d renderer will need, linked into
-# the NRO and exercised by a smoke test (switch/source/deko/dk_smoke.cpp) while the game draws with Dawn
-# on NVK. Included from the Switch block of Echoes' CMakeLists.txt (switch/patches/echoes-*.patch).
+# mp2-nx deko3d renderer (docs/deko3d-plan.md, docs/deko3d-phase1-design.md): deko3d, uam, Tint GLSL and
+# the bridge under Aurora's WebGPU calls (switch/deko), chosen at run time in the Switch menu.
+# Included from the Switch block of Echoes' CMakeLists.txt (switch/patches/echoes-*.patch).
 #
 #   deko3d 0.5.0 and uam 1.1.0 (zlib, with SwitchWaker's PATCHES.md): from MP2NX_SWITCHWAKER_DIR, a
 #     SwitchWaker checkout at 084291f (switch/fetch_sources.sh), built here for the console
@@ -53,20 +53,65 @@ set_target_properties(mp2nx_uam PROPERTIES IMPORTED_LOCATION "${_dk_uam_renamed}
   INTERFACE_INCLUDE_DIRECTORIES "${_dk_sw}/uam")
 add_dependencies(mp2nx_uam mp2nx_uam_renamed)
 
-# The translation and the smoke test
+# The renderer (docs/deko3d-phase1-design.md): deko3d under Aurora's WebGPU calls
+set(_dk "${MP2NX_ROOT}/switch/deko")
 add_library(mp2nx_deko STATIC
-  "${MP2NX_ROOT}/switch/deko/shader_translate.cpp"
-  "${MP2NX_ROOT}/switch/source/deko/dk_smoke.cpp")
-target_include_directories(mp2nx_deko PRIVATE "${MP2NX_ROOT}/switch/deko" "${_dk_sw}/uam"
+  "${_dk}/shader_translate.cpp"
+  "${_dk}/shader_cache.cpp"
+  "${_dk}/mpl/descriptors.cpp"
+  "${_dk}/mpl/device.cpp"
+  "${_dk}/mpl/dksh_file.cpp"
+  "${_dk}/mpl/memory.cpp"
+  "${_dk}/mpl/shaders.cpp"
+  "${_dk}/dk_objects.cpp"
+  "${_dk}/dk_buffers.cpp"
+  "${_dk}/dk_pipelines.cpp"
+  "${_dk}/dk_encoder.cpp"
+  "${_dk}/dk_surface.cpp")
+target_include_directories(mp2nx_deko PRIVATE "${_dk}" "${_dk}/mpl" "${_dk_sw}/uam"
   "${MP2NX_DAWN_SRC}" "${MP2NX_DAWN_SRC}/include" "${MP2NX_PREFIX}/include")
 # Tint's build flags, as its targets export them (shader_translate.cpp reads its headers)
 target_compile_definitions(mp2nx_deko PRIVATE TINT_BUILD_GLSL_WRITER=1 TINT_BUILD_WGSL_READER=1
   TINT_BUILD_WGSL_WRITER=1 TINT_BUILD_SPV_READER=1 TINT_BUILD_SPV_WRITER=1 TINT_BUILD_HLSL_WRITER=0
   TINT_BUILD_MSL_WRITER=0 TINT_BUILD_GLSL_VALIDATOR=0 TINT_BUILD_NULL_WRITER=1 TINT_BUILD_IR_BINARY=0
-  TINT_BUILD_TINTD=0 TINT_BUILD_IS_LINUX=0 TINT_BUILD_IS_MAC=0 TINT_BUILD_IS_WIN=0)
+  TINT_BUILD_TINTD=0 TINT_BUILD_IS_LINUX=0 TINT_BUILD_IS_MAC=0 TINT_BUILD_IS_WIN=0
+  # the caches: the offline one in the NRO's romfs, this console's next to the logs
+  "COS_SWITCH_NRO_DIR=\"romfs:\"" "COS_SWITCH_DATA_DIR=\"sdmc:/switch/${MP2NX_APP_NAME}\""
+  "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"")
 set_target_properties(mp2nx_deko PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
-target_compile_definitions(mp2nx_deko PRIVATE "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"")
 add_dependencies(mp2nx_deko mp2nx_uam_renamed)
 # Tint's archives also carry objects the monolithic Dawn has (the same build): one group, rescanned
-target_link_libraries(mp2nx_deko PUBLIC mp2nx_uam deko3d_release "$<LINK_GROUP:RESCAN,${_dk_tint_libs}>")
-message(STATUS "mp2-nx: deko3d phase 0 toolchain (deko3d, uam, Tint GLSL) from ${MP2NX_SWITCHWAKER_DIR}")
+target_link_libraries(mp2nx_deko PUBLIC mp2nx_uam deko3d_release xxHash::xxhash z "$<LINK_GROUP:RESCAN,${_dk_tint_libs}>")
+# webgpu/gpu.cpp: the choice and the set-up (on that one file, so the rest of Aurora keeps its objects)
+get_target_property(_dk_aurora_dir aurora_core SOURCE_DIR)
+set_source_files_properties("${_dk_aurora_dir}/lib/webgpu/gpu.cpp" DIRECTORY "${_dk_aurora_dir}"
+  PROPERTIES COMPILE_DEFINITIONS MP2NX_DEKO3D=1)
+
+# The WebGPU functions whose calls the renderer takes (switch/deko/dk_*.cpp define __wrap_<name>)
+set(MP2NX_DEKO3D_WRAPS
+  wgpuDeviceCreateTexture wgpuTextureAddRef wgpuTextureRelease wgpuTextureCreateView wgpuTextureViewAddRef
+  wgpuTextureViewRelease wgpuDeviceCreateSampler wgpuSamplerAddRef wgpuSamplerRelease wgpuDeviceCreateBindGroup
+  wgpuBindGroupAddRef wgpuBindGroupRelease wgpuDeviceCreateBindGroupLayout wgpuBindGroupLayoutAddRef
+  wgpuBindGroupLayoutRelease wgpuTextureDestroy
+  wgpuDeviceCreateBuffer wgpuBufferAddRef wgpuBufferRelease wgpuBufferDestroy wgpuBufferGetMappedRange
+  wgpuBufferGetConstMappedRange wgpuBufferMapAsync wgpuBufferUnmap wgpuInstanceProcessEvents wgpuInstanceWaitAny
+  wgpuDeviceCreateShaderModule wgpuShaderModuleAddRef wgpuShaderModuleRelease wgpuDeviceCreateRenderPipeline
+  wgpuRenderPipelineAddRef wgpuRenderPipelineRelease
+  wgpuDeviceCreateCommandEncoder wgpuCommandEncoderRelease wgpuCommandEncoderFinish wgpuCommandBufferRelease
+  wgpuCommandEncoderBeginRenderPass wgpuRenderPassEncoderEnd wgpuRenderPassEncoderRelease
+  wgpuRenderPassEncoderSetPipeline wgpuRenderPassEncoderSetBindGroup wgpuRenderPassEncoderSetVertexBuffer
+  wgpuRenderPassEncoderSetIndexBuffer wgpuRenderPassEncoderDraw wgpuRenderPassEncoderDrawIndexed
+  wgpuRenderPassEncoderSetViewport wgpuRenderPassEncoderSetScissorRect wgpuRenderPassEncoderSetBlendConstant
+  wgpuRenderPassEncoderSetImmediates wgpuRenderPassEncoderPushDebugGroup wgpuRenderPassEncoderPopDebugGroup
+  wgpuCommandEncoderBeginComputePass wgpuComputePassEncoderDispatchWorkgroups wgpuComputePassEncoderEnd
+  wgpuComputePassEncoderRelease wgpuComputePassEncoderSetBindGroup wgpuComputePassEncoderSetPipeline
+  wgpuCommandEncoderCopyBufferToBuffer wgpuCommandEncoderCopyBufferToTexture wgpuCommandEncoderCopyTextureToBuffer
+  wgpuCommandEncoderCopyTextureToTexture wgpuCommandEncoderWriteTimestamp wgpuCommandEncoderResolveQuerySet
+  wgpuQueueSubmit wgpuQueueWriteBuffer wgpuQueueWriteTexture
+  wgpuInstanceCreateSurface wgpuSurfaceAddRef wgpuSurfaceRelease wgpuSurfaceGetCapabilities
+  wgpuSurfaceCapabilitiesFreeMembers wgpuSurfaceConfigure wgpuSurfaceGetCurrentTexture wgpuSurfacePresent)
+set(MP2NX_DEKO3D_WRAP_FLAGS "")
+foreach(_f IN LISTS MP2NX_DEKO3D_WRAPS)
+  list(APPEND MP2NX_DEKO3D_WRAP_FLAGS "-Wl,--wrap=${_f}")
+endforeach()
+message(STATUS "mp2-nx: deko3d renderer (run-time choice) with deko3d, uam and Tint GLSL from ${MP2NX_SWITCHWAKER_DIR}")
