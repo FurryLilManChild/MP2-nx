@@ -69,7 +69,8 @@ add_library(mp2nx_deko STATIC
   "${_dk}/dk_encoder.cpp"
   "${_dk}/dk_surface.cpp")
 target_include_directories(mp2nx_deko PRIVATE "${_dk}" "${_dk}/mpl" "${_dk_sw}/uam"
-  "${MP2NX_DAWN_SRC}" "${MP2NX_DAWN_SRC}/include" "${MP2NX_PREFIX}/include")
+  "${MP2NX_DAWN_SRC}" "${MP2NX_DAWN_SRC}/include" "${MP2NX_PREFIX}/include"
+  "${DEVKITPRO}/portlibs/switch/include")
 # Tint's build flags, as its targets export them (shader_translate.cpp reads its headers)
 target_compile_definitions(mp2nx_deko PRIVATE TINT_BUILD_GLSL_WRITER=1 TINT_BUILD_WGSL_READER=1
   TINT_BUILD_WGSL_WRITER=1 TINT_BUILD_SPV_READER=1 TINT_BUILD_SPV_WRITER=1 TINT_BUILD_HLSL_WRITER=0
