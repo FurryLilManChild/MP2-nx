@@ -2,6 +2,15 @@
 
 Newest first.
 
+## 2026-11-03: test6e, gyro left/right again
+
+- Test6d (the owner): gyro left/right still reversed. The test6d change (y and z negated on both sensors) could not change
+  it: Echoes' default gyro space is Player (port_gyro_motion.cpp), which takes yaw about the gravity direction from
+  the accelerometer, so turning both sensors together cancels out.
+- Test6e: gyro axes back to libnx's (test6c had pitch right), accelerometer negated (libnx's sign is opposite to
+  SDL's, by inference from the two tests; unverified). Fallback if still wrong: the Local gyro space (yaw = -y, no
+  gravity). Also includes the standard menu buttons change.
+
 ## 2026-11-03: test6c result, test6d
 
 - Test6c (the owner): rumble works, gyro aim works but left/right is reversed, Exit game returns to HOME cleanly (the

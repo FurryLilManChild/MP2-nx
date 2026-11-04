@@ -133,16 +133,19 @@ bool read_motion(float gyro[3], float accel[3]) {
   }
   constexpr float kRevToRad = 6.28318530717958647692f;
   constexpr float kG = 9.80665f;
-  // test6c on hardware: pitch right, left/right turning reversed. libnx's frame is SDL's turned
-  // 180 degrees about x, so y and z are negated (both, for gyro and accel alike: flipping one
-  // axis alone would mirror the frame, which breaks Echoes' gravity-based gyro space).
+  // Directions, from hardware: test6c (raw libnx axes) had pitch right and left/right reversed.
+  // test6d negated y and z of both sensors (a 180 degree turn), which changed nothing: Echoes'
+  // default gyro space (Player) takes yaw about the gravity direction, so turning both sensors
+  // together cancels out. So the gyro keeps libnx's axes and the accelerometer is negated: libnx
+  // reports the acceleration with the opposite sign to SDL's (gravity, not the reaction to it),
+  // which flips Player-space yaw and leaves local pitch alone.
   if (gyro != nullptr) {
     gyro[0] = state.angular_velocity.x * kRevToRad;
-    gyro[1] = -state.angular_velocity.y * kRevToRad;
-    gyro[2] = -state.angular_velocity.z * kRevToRad;
+    gyro[1] = state.angular_velocity.y * kRevToRad;
+    gyro[2] = state.angular_velocity.z * kRevToRad;
   }
   if (accel != nullptr) {
-    accel[0] = state.acceleration.x * kG;
+    accel[0] = -state.acceleration.x * kG;
     accel[1] = -state.acceleration.y * kG;
     accel[2] = -state.acceleration.z * kG;
   }
