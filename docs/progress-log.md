@@ -2,6 +2,12 @@
 
 Newest first.
 
+## 2026-11-03: test6c, Exit game
+
+Test6b plus an "Exit game" row on the Switch menu's Game page (A twice), the F1 window's path: save settings, push
+SDL_EVENT_QUIT, so the main loop shuts down and the process ends through AM. Without it the only way out was HOME and
+Close, which never runs the test6 exit fix. In `C:\MP2-nx\out\test6c\`.
+
 ## 2026-11-03 (overnight): test6b, rumble and gyro
 
 Test6 plus `switch/source/platform/device_switch.cpp` (in `C:\MP2-nx\out\test6b\`, NRO sha256 d81a7387...): a reduced
