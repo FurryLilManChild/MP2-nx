@@ -17,6 +17,7 @@
 #include "MetroidPrime/Player/CGameOptions.hpp"
 #include "MetroidPrime/Player/CGameState.hpp"
 
+#include <SDL3/SDL_events.h>
 #include <SDL3/SDL_gamepad.h>
 #include <dolphin/pad.h>
 #include <imgui.h>
@@ -191,6 +192,7 @@ int sSelected[kPageCount] = {};
 int sScroll[kPageCount] = {};
 int sSlot = 1;
 bool sConfirmTitle = false;
+bool sConfirmExit = false;
 bool sCloseRequested = false;
 bool sWasVisible = false;
 
@@ -512,6 +514,21 @@ std::vector< Row > BuildRows(int page) {
                       PortOverlay::RequestReturnToTitle();
                       sCloseRequested = true;
                     }});
+    // The F1 window's "Exit game" (debug_ui/game_sections.cpp): the same quit as closing the window,
+    // so the main loop shuts down cleanly and the process ends through AM (startup.cpp).
+    rows.push_back({sConfirmExit ? "Exit game: press A again" : "Exit game", "",
+                    "Back to the HOME menu. Progress since the last save is lost", nullptr, [] {
+                      if (!sConfirmExit) {
+                        sConfirmExit = true;
+                        return;
+                      }
+                      sConfirmExit = false;
+                      PortOverlaySettings::SaveSettings();
+                      SDL_Event quit{};
+                      quit.type = SDL_EVENT_QUIT;
+                      SDL_PushEvent(&quit);
+                      sCloseRequested = true;
+                    }});
     break;
   }
   case kSaveStates: {
@@ -810,6 +827,7 @@ bool Draw() {
   sWasVisible = true;
   if (fresh) {
     sConfirmTitle = false;
+    sConfirmExit = false;
     sCloseRequested = false;
     sSlot = std::clamp(PortSaveState::SelectedSlot(), 1, PortSaveState::kSlotCount);
   }
@@ -820,6 +838,7 @@ bool Draw() {
   if (in.l || in.r) {
     sPage = (sPage + (in.r ? 1 : -1) + kPageCount) % kPageCount;
     sConfirmTitle = false;
+    sConfirmExit = false;
   }
   std::vector< Row > rows = BuildRows(sPage);
   int& sel = sSelected[sPage];
@@ -886,6 +905,7 @@ bool Draw() {
   }
   if (in.up || in.down) {
     sConfirmTitle = sConfirmTitle && rows[sel].label.rfind("Return to title", 0) == 0;
+    sConfirmExit = sConfirmExit && rows[sel].label.rfind("Exit game", 0) == 0;
   }
   Row& cur = rows[sel];
   if (cur.enabled) {
@@ -901,8 +921,9 @@ bool Draw() {
     }
   }
   if (in.b) {
-    if (sConfirmTitle) {
+    if (sConfirmTitle || sConfirmExit) {
       sConfirmTitle = false;
+      sConfirmExit = false;
     } else {
       sCloseRequested = true;
     }
