@@ -170,10 +170,20 @@ void* worker_main(void*) {
             take_job(&job);
         }
         ShaderEntry* e = job.entry;
+        // mp2-nx: the GLSL uam is about to compile, on the SD card until it is done: if uam crashes the
+        // console, the shader that did it is there to reproduce on a PC (deko-4: a crash inside uam's
+        // st_glsl_to_tgsi when the scan visor came up)
+        char inflight[256];
+        snprintf(inflight, sizeof inflight, "%s/uam_inflight_%s.glsl", kFailDir, e->stage == ShaderStage::Vertex ? "vs" : "fs");
+        if (FILE* f = fopen(inflight, "wb")) {
+            fwrite(job.glsl.data(), 1, job.glsl.size(), f);
+            fclose(f);
+        }
         const uint64_t c0 = now_ns();
         uam::Result res = uam::compile(e->stage == ShaderStage::Vertex ? uam::Stage::Vertex : uam::Stage::Fragment,
                                        job.glsl.c_str());
         const uint64_t ns = now_ns() - c0;
+        remove(inflight);
         const bool ok = res.ok && !res.dksh.empty();
         if (ok) {
             append_local(*e, res.dksh);

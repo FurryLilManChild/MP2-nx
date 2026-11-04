@@ -248,7 +248,16 @@ const char* volatile mp2nx_crash_note = nullptr;
 extern "C" void __libnx_exception_handler(ThreadExceptionDump* ctx) {
   char buf[2048];
   int n = 0;
-  const u64 base = reinterpret_cast<u64>(&__start__);
+  // the program's load address: the start of the code mapping this handler is in (&__start__ came out as
+  // 0 in deko-3 and deko-4, so every "program +" offset was the raw address)
+  u64 base = reinterpret_cast<u64>(&__start__);
+  {
+    MemoryInfo mi{};
+    u32 pageInfo = 0;
+    if (R_SUCCEEDED(svcQueryMemory(&mi, &pageInfo, reinterpret_cast<u64>(&__libnx_exception_handler)))) {
+      base = mi.addr;
+    }
+  }
   const auto line = [&](const char* label, u64 v, bool offset) {
     n += put_str(buf + n, label);
     n += put_hex(buf + n, v);
