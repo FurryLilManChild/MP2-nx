@@ -44,6 +44,7 @@ constexpr const char* kConfigPath = "sdmc:/switch/mp2-nx/switch_menu.cfg";
 float sHandheldScale = 0.f;
 float sDockedScale = 0.f;
 bool sShowFps = false;
+bool sMenuButtonsDefaulted = false; // the Switch default for Separate menu buttons was applied once
 bool sConfigLoaded = false;
 int sAppliedMode = -1; // AppletOperationMode the resolution was last applied for
 
@@ -63,6 +64,8 @@ void LoadConfig() {
       sDockedScale = v;
     } else if (std::sscanf(line, "fps_counter=%d", &i) == 1) {
       sShowFps = i != 0;
+    } else if (std::sscanf(line, "menu_buttons_defaulted=%d", &i) == 1) {
+      sMenuButtonsDefaulted = i != 0;
     }
   }
   std::fclose(f);
@@ -74,8 +77,8 @@ void SaveConfig() {
     std::fprintf(stderr, "mp2-nx: menu: could not write %s\n", kConfigPath);
     return;
   }
-  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\n", sHandheldScale, sDockedScale,
-               sShowFps ? 1 : 0);
+  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmenu_buttons_defaulted=%d\n",
+               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0);
   std::fclose(f);
 }
 
@@ -656,6 +659,9 @@ std::vector< Row > BuildRows(int page) {
                         sCapture.deadline = NowMs() + 6000;
                       }});
     }
+    rows.push_back({"Buttons in the game's menus", PortOverlay::MenuStandardButtons() ? "Always standard" : "Follow my remaps",
+                    "Standard: A selects and B goes back in menus and the map, whatever you remap. Pause and map follow your remaps",
+                    [](int) { PortOverlay::SetMenuStandardButtons(!PortOverlay::MenuStandardButtons()); }, nullptr});
     rows.push_back({"Reset buttons to default", "", "Puts every button back the way it started", nullptr, [] {
                       Toast(ResetButtons() ? "Buttons reset" : "Could not save the controls file");
                     }});
@@ -781,6 +787,14 @@ void DrawAlways() {
   if (!sConfigLoaded) {
     LoadConfig();
     mp2nx_load_boost(0, 1); // load_boost.cpp: the title's startup warmup (cleared by CMFGameLoader)
+    // The owner: remapping a gameplay button must not move the game's menu buttons (A confirms, B backs
+    // out). Echoes has this as "Separate menu buttons" (port_input_devices.cpp ApplyMenuButtons),
+    // off by default; on the Switch it starts on, once, so a later choice in the menu is kept.
+    if (!sMenuButtonsDefaulted) {
+      sMenuButtonsDefaulted = true;
+      PortOverlay::SetMenuStandardButtons(true);
+      SaveConfig();
+    }
     mp2nx_start_log_flusher(); // misc_switch.cpp
   }
   ApplyModeScale(false);
