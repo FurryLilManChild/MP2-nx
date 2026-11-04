@@ -14,6 +14,9 @@
 #include "port_savestate.h"
 #include "port_video.h"
 
+#include "MetroidPrime/Player/CGameOptions.hpp"
+#include "MetroidPrime/Player/CGameState.hpp"
+
 #include <SDL3/SDL_gamepad.h>
 #include <dolphin/pad.h>
 #include <imgui.h>
@@ -578,6 +581,39 @@ std::vector< Row > BuildRows(int page) {
       rows.push_back({"Aim crosshair", OnOff(sAimCrosshair), "Shows the crosshair while the right stick aims",
                       [](int d) { Toggle(sAimCrosshair, d); }, nullptr});
     }
+    {
+      static const char* const kGyroModes[] = {"Off", "Hold to aim", "Always on", "Hold to pause", "Toggle"};
+      const int mode = sGyroAim ? std::clamp(sGyroMode, PortOverlay::kGyroModeMin, PortOverlay::kGyroModeMax) : 0;
+      rows.push_back({"Gyro aim", kGyroModes[mode],
+                      PortMouse::StickEnabled()
+                          ? "Tilt the controller to aim. The gyro button is right stick click"
+                          : "Tilt the controller to aim. Needs Twin stick aiming on",
+                      [](int d) {
+                        int m = sGyroAim ? std::clamp(sGyroMode, PortOverlay::kGyroModeMin, PortOverlay::kGyroModeMax) : 0;
+                        m = (m + d + 5) % 5;
+                        sGyroAim = m > 0;
+                        if (m > 0) sGyroMode = m;
+                        Changed(true);
+                      },
+                      nullptr});
+      if (sGyroAim) {
+        char v[16];
+        std::snprintf(v, sizeof(v), "%.1fx", static_cast< double >(sGyroSensitivity));
+        rows.push_back({"Gyro sensitivity", v, "How far the view turns per turn of the controller", [](int d) {
+                          sGyroSensitivity = std::clamp(sGyroSensitivity + d * 0.1f, PortOverlay::kGyroSensitivityMin,
+                                                        PortOverlay::kGyroSensitivityMax);
+                          Changed(true);
+                        },
+                        nullptr});
+      }
+    }
+    rows.push_back({"Rumble", gpGameState != nullptr && gpGameState->GameOptions().GetIsRumbleEnabled() ? "On" : "Off",
+                    "Same switch as Rumble in the game's pause menu", [](int) {
+                      if (gpGameState != nullptr) {
+                        gpGameState->GameOptions().SetIsRumbleEnabled(!gpGameState->GameOptions().GetIsRumbleEnabled());
+                      }
+                    },
+                    nullptr});
     rows.push_back({"Lock-on toggle", OnOff(sLockOnToggle), "Tap to lock on and tap again to let go, instead of holding",
                     [](int d) { Toggle(sLockOnToggle, d); }, nullptr});
     rows.push_back({"Sticky charge", OnOff(sStickyCharge), "Charge shots stay charged without holding fire",

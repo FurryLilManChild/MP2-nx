@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-11-03 (overnight): test6b, rumble and gyro
+
+Test6 plus `switch/source/platform/device_switch.cpp` (in `C:\MP2-nx\out\test6b\`, NRO sha256 d81a7387...): a reduced
+port of aurora-aleks lib/device_switch.cpp (MIT). Aurora's lib/device.cpp is compiled empty on Switch and this file
+gives aurora::device rumble (hidInitializeVibrationDevices for player 1's npad, 160/320 Hz, a worker ending timed
+pulses, stopped on focus loss) and gyro/accel (six-axis, revolutions/s to rad/s and g to m/s^2, right Joy-Con of a
+detached pair). Player 1's npad by Alek's rule: the one connected alone, else the one with the latest input.
+Echoes' ReadGyroRates reads it through `mp2nx_switch_gyro` (SDL has no sensors on Switch). Menu: Gyro aim (Off, Hold,
+Always, Hold to pause, Toggle), gyro sensitivity, Rumble (the game's own option). Axis directions are as libnx gives
+them (as Alek passes them); unverified on hardware.
+
 ## 2026-11-03 (overnight): test6, Alek's fixes
 
 Built clean (NRO sha256 ce2ac6e2...; in `C:\MP2-nx\out\test6\` so test5 stays on the owner's SD folder). From the two

@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..77f067fd5 100644
+index ef1c8c60d..c6462d83c 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..77f067fd5 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,40 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,41 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -35,7 +35,8 @@ index ef1c8c60d..77f067fd5 100644
 +        ${MP2NX_ROOT}/switch/source/platform/sqlite_switch.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/rename_wrap.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/load_boost.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/misc_switch.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/misc_switch.cpp
++        ${MP2NX_ROOT}/switch/source/platform/device_switch.cpp)
 +    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
 +    set_source_files_properties(${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp PROPERTIES
 +        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui;${CMAKE_CURRENT_SOURCE_DIR}/platform/input")
@@ -109,6 +110,39 @@ index 2b05502ac..c9b72c552 100644
  
    if (!open) {
      sVisible = false;
+diff --git a/platform/input/port_input_devices.cpp b/platform/input/port_input_devices.cpp
+index cc7e6a6b8..3b57b4a43 100644
+--- a/platform/input/port_input_devices.cpp
++++ b/platform/input/port_input_devices.cpp
+@@ -43,6 +43,11 @@
+ #include <mutex>
+ #include <sstream>
+ 
++#if defined(__SWITCH__)
++// mp2-nx switch/source/platform/device_switch.cpp
++extern "C" bool mp2nx_switch_gyro(float gyro[3], float accel[3], bool* haveAccel);
++#endif
++
+ namespace aurora {
+ void request_screenshot() noexcept;
+ }
+@@ -1475,6 +1480,16 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
+     }
+   }
+ 
++#if defined(__SWITCH__)
++  // mp2-nx: SDL reports no sensors on the Switch; device_switch.cpp reads player 1's six-axis
++  // sensor through libnx, in SDL's units.
++  if (source == 0 && wantController) {
++    if (mp2nx_switch_gyro(gyro, accel, &haveAccel)) {
++      source = 1;
++      sGyroStatus = "controller";
++    }
++  }
++#endif
+   if (source == 0 && wantPhone) {
+     const uint64_t searchNow = SDL_GetTicksNS();
+     if (sPhoneGyro == nullptr && searchNow >= sPhoneNextSearchNs) {
 diff --git a/platform/main.cpp b/platform/main.cpp
 index a3d106a14..1a7fddffd 100644
 --- a/platform/main.cpp
