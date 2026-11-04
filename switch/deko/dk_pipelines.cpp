@@ -116,6 +116,18 @@ bool make_stage(const Mod* m, const std::string& entry, swdk::ShaderStage stage,
         tr = swdk::wgsl_to_glsl(m->wgsl, entry, stage, swdk::BindingScheme::Sequential);
     }
     const uint64_t t1 = swdk::now_ns();
+    {
+        // mp2-nx (deko-5): the WGSL of every stage translated here, kept with the GLSL (shaders.cpp) to run
+        // Tint and uam on a PC with a memory checker
+        char path[256];
+        snprintf(path, sizeof path, "sdmc:/switch/" MP2NX_APP_NAME "/cache/glsl/W%016llx.wgsl", (unsigned long long)m->hash);
+        if (FILE* f = fopen(path, "rb")) {
+            fclose(f);
+        } else if (FILE* w = fopen(path, "wb")) {
+            fwrite(m->wgsl.data(), 1, m->wgsl.size(), w);
+            fclose(w);
+        }
+    }
     if (!tr.ok) {
         log("pipelines: %s (%s %s) does not translate: %.300s", label.c_str(), stage_tag(stage), entry.c_str(),
             tr.error.c_str());

@@ -183,7 +183,14 @@ void* worker_main(void*) {
         uam::Result res = uam::compile(e->stage == ShaderStage::Vertex ? uam::Stage::Vertex : uam::Stage::Fragment,
                                        job.glsl.c_str());
         const uint64_t ns = now_ns() - c0;
-        remove(inflight);
+        // mp2-nx (deko-5: heap corruption whenever the scan visor's shaders compile): every GLSL compiled
+        // here is kept in cache/glsl/, to run through uam on a PC with a memory checker
+        {
+            char keep[256];
+            snprintf(keep, sizeof keep, "%s/glsl/%016llx_%s.glsl", kFailDir, (unsigned long long)e->glslHash,
+                     e->stage == ShaderStage::Vertex ? "vs" : "fs");
+            rename(inflight, keep);
+        }
         const bool ok = res.ok && !res.dksh.empty();
         if (ok) {
             append_local(*e, res.dksh);

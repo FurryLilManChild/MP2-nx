@@ -15,6 +15,8 @@
 
 #include <switch.h>
 
+#include <sys/stat.h>
+
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -122,6 +124,8 @@ bool choose() {
 }
 
 void init(uint32_t gxConfigVersion) {
+    mkdir(MP2NX_APP_DIR "/cache", 0777);
+    mkdir(MP2NX_APP_DIR "/cache/glsl", 0777);
     swdk::device_init(gxConfigVersion);
     encoder_init();
 }
