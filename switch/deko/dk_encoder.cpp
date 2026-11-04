@@ -402,6 +402,43 @@ void end_pass(Replay& r) {
     r.inPass = false;
 }
 
+// A colour slot without a usable target (WebGPU allows a null view between used ones; a view without a
+// deko3d image): deko3d needs an image in every slot it binds, so trailing empty slots are not bound and
+// one in the middle gets a scratch image of the pass's size (its writes go nowhere useful).
+struct Scratch {
+    uint32_t w = 0, h = 0;
+    DkImage image{};
+    swdk::ImageAlloc mem;
+};
+std::vector<Scratch> g_scratch;
+const DkImage* scratch_image(uint32_t w, uint32_t h) {
+    for (Scratch& s : g_scratch)
+        if (s.w == w && s.h == h) return &s.image;
+    Scratch s;
+    s.w = w;
+    s.h = h;
+    DkImageLayoutMaker m;
+    dkImageLayoutMakerDefaults(&m, R.device);
+    m.flags = DkImageFlags_UsageRender;
+    m.format = DkImageFormat_RGBA8_Unorm;
+    m.dimensions[0] = w;
+    m.dimensions[1] = h;
+    DkImageLayout layout;
+    dkImageLayoutInitialize(&layout, &m);
+    s.mem = swdk::image_alloc(uint32_t(dkImageLayoutGetSize(&layout)), dkImageLayoutGetAlignment(&layout));
+    dkImageInitialize(&s.image, &layout, s.mem.block, s.mem.offset);
+    g_scratch.push_back(s);
+    log("encoder: a scratch colour target %ux%u for an empty slot between used ones", w, h);
+    return &g_scratch.back().image;
+}
+
+const char* why_unusable(const View* v) {
+    if (!v) return "no view (an empty slot)";
+    if (!v->tex) return "a view without a texture shadow";
+    if (!v->tex->valid) return "a texture without a deko3d image (its format)";
+    return nullptr;
+}
+
 void begin_pass(Replay& r, const PassDesc& p) {
     work_begin(r);
     r.inPass = true;
@@ -434,7 +471,20 @@ void begin_pass(Replay& r, const PassDesc& p) {
             r.height = level_size(p.depth->tex->height, p.depth->baseMip);
         }
     }
-    dkCmdBufBindRenderTargets(R.cmd, colorPtrs, p.colorCount, depthPtr);
+    // empty slots: trailing ones are left out, middle ones get a scratch image
+    uint32_t bound = p.colorCount;
+    while (bound > 0 && !colorPtrs[bound - 1]) bound--;
+    for (uint32_t i = 0; i < p.colorCount; i++) {
+        if (colorPtrs[i]) continue;
+        static int logged = 0;
+        if (logged++ < 8) log("encoder: render pass colour slot %u of %u: %s", i, p.colorCount, why_unusable(p.colors[i].view));
+        if (i < bound && r.width) {
+            dkImageViewDefaults(&colors[i], scratch_image(r.width, r.height));
+            colorPtrs[i] = &colors[i];
+        }
+    }
+    if (bound > 0 && !r.width) bound = 0;
+    dkCmdBufBindRenderTargets(R.cmd, colorPtrs, bound, depthPtr);
     static const DkViewportSwizzle kSwizzle = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
                                                DkSwizzle_PositiveW};
     dkCmdBufSetViewportSwizzles(R.cmd, 0, &kSwizzle, 1);
@@ -442,9 +492,9 @@ void begin_pass(Replay& r, const PassDesc& p) {
     const DkScissor sc = {0, 0, r.width, r.height};
     dkCmdBufSetViewports(R.cmd, 0, &vp, 1);
     dkCmdBufSetScissors(R.cmd, 0, &sc, 1);
-    for (uint32_t i = 0; i < p.colorCount; i++) {
+    for (uint32_t i = 0; i < bound; i++) {
         const Attachment& a = p.colors[i];
-        if (!a.clear || !colorPtrs[i]) continue;
+        if (!a.clear || !colorPtrs[i] || !a.view || !a.view->tex || !a.view->tex->valid) continue;
         const WGPUColor& c = a.clearValue;
         if (is_int_format(a.view->tex->wformat)) {
             dkCmdBufClearColorUint(R.cmd, i, DkColorMask_RGBA, uint32_t(c.r), uint32_t(c.g), uint32_t(c.b), uint32_t(c.a));
