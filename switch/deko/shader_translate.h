@@ -52,7 +52,7 @@ enum class BindingScheme : uint8_t {
 constexpr uint32_t kImmediatesUboSlot = 15;
 // Changes whenever this file's output for the same input changes (Tint options, post-pass rules):
 // part of the DKSH cache's compiler id.
-constexpr uint32_t kTranslateRevision = 2;  // mp2-nx: 2 (sampler bindings recorded)
+constexpr uint32_t kTranslateRevision = 3;  // mp2-nx: 2 sampler bindings recorded, 3 robustness on
 
 struct SlotBinding {
     enum class Kind : uint8_t { Uniform, Storage, Sampler, Immediates };

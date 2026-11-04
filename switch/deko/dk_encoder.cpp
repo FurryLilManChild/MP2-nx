@@ -321,6 +321,14 @@ void work_begin(Replay& r) {
 
 uint32_t level_size(uint32_t size, uint32_t level) { return std::max(size >> level, 1u); }
 
+// a copy that would write past the end of its buffer: skipped (the GPU would write over whatever memory
+// follows the buffer's block)
+void bad_copy(const char* what, uint64_t need, uint64_t size) {
+    static int logged = 0;
+    if (logged++ < 16) log("encoder: a copy %s needs %llu bytes of a %llu-byte buffer: skipped", what,
+                           (unsigned long long)need, (unsigned long long)size);
+}
+
 
 bool is_int_format(WGPUTextureFormat f) {
     switch (f) {
@@ -671,6 +679,10 @@ void replay(Replay& r, Enc* e) {
         case OpType::CopyB2B: {
             const CopyDesc& c = e->copies[op.u[0]];
             if (!c.buf || !c.buf2 || !c.buf->mem || !c.buf2->mem || c.size == 0) break;
+            if (c.offset + c.size > c.buf->size || c.offset2 + c.size > c.buf2->size) {
+                bad_copy("buffer to buffer", c.offset2 + c.size, c.buf2->size);
+                break;
+            }
             transfer_begin(r);
             dkCmdBufCopyBuffer(R.cmd, c.buf->mem.gpu + c.offset, c.buf2->mem.gpu + c.offset2, uint32_t(c.size));
             mark(c.buf, r);
@@ -698,6 +710,12 @@ void replay(Replay& r, Enc* e) {
             const DkImageRect rect = {c.origin.x, c.origin.y, c.origin.z, w, h,
                                       std::max<uint32_t>(c.extent.depthOrArrayLayers, 1)};
             const uint32_t rows = c.rowsPerImage ? c.rowsPerImage : h;
+            const uint64_t need = c.offset + uint64_t(c.bytesPerRow) * (rows * (rect.depth - 1) + h - 1) +
+                                  uint64_t(w) * t->blockBytes;
+            if (need > c.buf->size) {
+                bad_copy("texture to buffer", need, c.buf->size);
+                break;
+            }
             const DkCopyBuf out = {c.buf->mem.gpu + c.offset, c.bytesPerRow, c.bytesPerRow * rows};
             dkCmdBufCopyImageToBuffer(R.cmd, &v, &rect, &out, 0);
             mark(c.buf, r);

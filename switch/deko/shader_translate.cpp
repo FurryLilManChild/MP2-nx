@@ -75,7 +75,10 @@ TranslateResult wgsl_to_glsl(const std::string& wgsl, const std::string& entryPo
     tint::glsl::writer::Options options;
     options.version = tint::glsl::writer::Version(tint::glsl::writer::Version::Standard::kDesktop, 4, 6);
     options.entry_point_name = entryPoint;
-    options.disable_robustness = true;
+    // mp2-nx: robustness on (deko-6): Aurora's shaders count on WebGPU's clamping of buffer indices (Dawn's
+    // SPIR-V keeps it); without it an index past a storage buffer wrote over the heap the deko3d memory
+    // blocks live in
+    options.disable_robustness = false;
     options.depth_zero_to_one = true;
     options.disable_position_y_negation = true;
     options.use_uniform_buffers = true;
