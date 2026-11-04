@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-04: play-session logs, test7
+
+- Logs (test6d, longer play): boot prepared 575 cached pipelines in 23.6 s (test3: 271 in 35.7 s), so the load boost
+  works. New pipelines in gameplay: 208 compiles, median 591 ms, p90 971 ms, max 2083 ms; one area needed 178 new
+  (185,483 skipped draws), another 238. Free heap never under 1.69 GB; textures peaked at 104 MiB (the test6c climb did
+  not recur). No errors.
+- The owner's caches: his Switch cache (1,180 recipes, 2,570 uses) and the PC 0.6.1 one (872, 2,021); 770 of the PC's are
+  identical by hash. Same schema (1) and GX config version (15).
+- Test7 (NRO sha256 6f27ea16..., `C:\MP2-nx\out\test7\`):
+  - Starter list: both merged (1,282 recipes, 3,018 uses, 5.4 MB) as romfs:/initial_pipeline_cache.db. Game-derived,
+    so outside the repo (`out/romfs`, CMake MP2NX_ROMFS_DIR); the NRO gets ROMFS only when the folder exists. Merged
+    into the SD cache once per seed (its size kept in table mp2nx_seed), not on every start.
+  - Backlog boost: 8 or more game-requested pipelines waiting boosts the compile thread until the queue is empty.
+  - Timing: each slow compile and the 100/500/1000 summaries now give the build_shader share (WGSL generation and
+    CreateShaderModule) apart from the rest (Tint to SPIR-V and NVK).
+  - The owner's notes: SDL joystick L/R as shoulders and ZL/ZR as triggers with no MISC copies (SDL rebuilt), Separate menu
+    buttons on by default, gyro (libnx axes, accelerometer negated), Spring Ball description, [dock] log off on
+    Switch, scan peek diagnostics every 512 instead of 32.
+- Plan (the owner): after test7, a private test release as a fallback, then the deko3d work (stage 2).
+
 ## 2026-11-03: test6e, gyro left/right again
 
 - Test6d (the owner): gyro left/right still reversed. The test6d change (y and z negated on both sensors) could not change

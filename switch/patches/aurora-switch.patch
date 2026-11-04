@@ -131,7 +131,7 @@ index de8c3f93c..f02a1d834 100644
  const wgpu::Buffer& staging_buffer(size_t slot);
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index dfbba6023..ce9cdac28 100644
+index dfbba6023..9da71cce5 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
@@ -140,7 +140,12 @@ index dfbba6023..ce9cdac28 100644
  
  #include "clear.hpp"
  #include "fx_pipelines.hpp"
-@@ -32,6 +33,9 @@
+@@ -28,10 +29,14 @@
+ #include <type_traits>
+ #include <vector>
+ 
++#include <SDL3/SDL_filesystem.h>
+ #include <SDL3/SDL_iostream.h>
  #if defined(__GLIBC__) || defined(__ANDROID__)
  #include <malloc.h>
  #endif
@@ -150,7 +155,7 @@ index dfbba6023..ce9cdac28 100644
  #include <absl/container/flat_hash_map.h>
  #include <absl/container/flat_hash_set.h>
  #include <fmt/format.h>
-@@ -85,6 +89,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+@@ -85,6 +90,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
  constexpr size_t BuildPipelinesPerFrame = 1;
  #endif
  static std::vector<std::thread> g_pipelineThreads;
@@ -161,7 +166,46 @@ index dfbba6023..ce9cdac28 100644
  static std::atomic_bool g_pipelineThreadEnd = false;
  static std::condition_variable g_pipelineQueueCv;
  static std::condition_variable g_pipelineReadyCv;
-@@ -512,7 +520,12 @@ static void notify_pipeline_ready(bool queued) {
+@@ -479,10 +488,20 @@ static std::atomic<uint64_t> g_compileSlowestMs = 0;
+ static std::atomic<uint64_t> g_compileFailures = 0;
+ constexpr int64_t kSlowPipelineMs = 200;
+ 
++} // namespace aurora::gfx
++namespace aurora::gx {
++extern thread_local uint64_t g_buildShaderNs; // shader.cpp
++}
++namespace aurora::gfx {
++static std::atomic<uint64_t> g_compileShaderMs{0};
++
+ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineCallback&& create) {
+   const auto start = std::chrono::steady_clock::now();
++  gx::g_buildShaderNs = 0;
+   wgpu::RenderPipeline pipeline = create();
+   const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
++  const uint64_t shaderMs = gx::g_buildShaderNs / 1000000ull;
++  g_compileShaderMs.fetch_add(shaderMs, std::memory_order_relaxed);
+   const uint64_t count = g_compileCount.fetch_add(1, std::memory_order_relaxed) + 1;
+   g_compileTotalMs.fetch_add(static_cast<uint64_t>(ms.count()), std::memory_order_relaxed);
+   uint64_t slowest = g_compileSlowestMs.load(std::memory_order_relaxed);
+@@ -494,12 +513,13 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
+     g_compileFailures.fetch_add(1, std::memory_order_relaxed);
+     Log.error("pipeline: creation failed (hash {:016x})", hash);
+   } else if (ms.count() > kSlowPipelineMs) {
+-    Log.warn("pipeline: compile took {} ms (hash {:016x})", ms.count(), hash);
++    Log.warn("pipeline: compile took {} ms ({} ms shader source and parse) (hash {:016x})", ms.count(), shaderMs,
++             hash);
+   }
+   if (count == 100 || count == 500 || count == 1000) {
+-    Log.info("pipelines: {} compiled, total {} ms, slowest {} ms, {} failed", count,
+-             g_compileTotalMs.load(std::memory_order_relaxed), g_compileSlowestMs.load(std::memory_order_relaxed),
+-             g_compileFailures.load(std::memory_order_relaxed));
++    Log.info("pipelines: {} compiled, total {} ms ({} ms shader source and parse), slowest {} ms, {} failed", count,
++             g_compileTotalMs.load(std::memory_order_relaxed), g_compileShaderMs.load(std::memory_order_relaxed),
++             g_compileSlowestMs.load(std::memory_order_relaxed), g_compileFailures.load(std::memory_order_relaxed));
+   }
+   return pipeline;
+ }
+@@ -512,7 +532,12 @@ static void notify_pipeline_ready(bool queued) {
                                                                     g_pipelineLoadStart)
                   .count());
      // Prune GPU cache entries after fully loading the pipeline cache.
@@ -174,7 +218,7 @@ index dfbba6023..ce9cdac28 100644
    }
    g_pipelineReadyCv.notify_all();
  }
-@@ -772,6 +785,7 @@ static void pipeline_cache_abort() {
+@@ -772,6 +797,7 @@ static void pipeline_cache_abort() {
    if (g_pipelineCacheDb != nullptr) {
      sqlite3_close(g_pipelineCacheDb);
      g_pipelineCacheDb = nullptr;
@@ -182,7 +226,49 @@ index dfbba6023..ce9cdac28 100644
    }
    if (g_pipelineCacheCorrupt.exchange(false)) {
      Log.warn("Pipeline cache is damaged; deleting it");
-@@ -971,7 +985,7 @@ static bool prepare_pipeline_cache_db() {
+@@ -839,6 +865,28 @@ static void seed_pipeline_cache() {
+   }
+ 
+   const auto seedPath = pipeline_cache_seed_path();
++#if defined(__SWITCH__)
++  // mp2-nx: merge a given seed once, not on every start. Alek (aurora-aleks pipeline_cache.cpp:714)
++  // measured the every-start merge at 23.5 s of black screen on the console. The seed is known by
++  // its size; the cache remembers the last one merged in mp2nx_seed.
++  std::string seedSig;
++  {
++    SDL_PathInfo info{};
++    if (SDL_GetPathInfo(seedPath.c_str(), &info)) {
++      seedSig = fmt::format("{}", static_cast<unsigned long long>(info.size));
++    }
++  }
++  if (!seedSig.empty()) {
++    sqlite::exec(g_pipelineCacheDb, "CREATE TABLE IF NOT EXISTS mp2nx_seed (sig TEXT NOT NULL)");
++    bool merged = false;
++    const auto query = fmt::format("SELECT 1 FROM mp2nx_seed WHERE sig = '{}'", seedSig);
++    sqlite::exec(g_pipelineCacheDb, query.c_str(), [&merged](int, char**, char**) { merged = true; });
++    if (merged) {
++      Log.info("Bundled pipeline cache '{}' already merged (size {})", seedPath, seedSig);
++      return;
++    }
++  }
++#endif
+   sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
+   if (seedDb == nullptr) {
+     return;
+@@ -952,6 +1000,12 @@ static void seed_pipeline_cache() {
+   if (!readFailed) {
+     Log.info("Seeded pipeline cache from '{}' ({} rows merged, {} rows skipped, {} uses)", seedPath, mergedRows,
+              skippedRows, mergedUses);
++#if defined(__SWITCH__)
++    if (!seedSig.empty()) {
++      sqlite::exec(g_pipelineCacheDb, "DELETE FROM mp2nx_seed");
++      sqlite::exec(g_pipelineCacheDb, fmt::format("INSERT INTO mp2nx_seed (sig) VALUES ('{}')", seedSig).c_str());
++    }
++#endif
+   }
+ }
+ 
+@@ -971,7 +1025,7 @@ static bool prepare_pipeline_cache_db() {
      return false;
    }
  
@@ -191,7 +277,7 @@ index dfbba6023..ce9cdac28 100644
    if (ret != SQLITE_OK) {
      Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
      pipeline_cache_abort();
-@@ -1306,6 +1320,38 @@ static void pipeline_cache_writer() {
+@@ -1306,6 +1360,40 @@ static void pipeline_cache_writer() {
    }
  }
  
@@ -201,11 +287,13 @@ index dfbba6023..ce9cdac28 100644
 +// during gameplay against ~21 ms at boot, the thread starved rather than the cache cold. The worker
 +// applies a change itself, before its next pipeline.
 +static std::atomic<uint32_t> g_compileBoost{0};
++static std::atomic<bool> g_compileBacklog{false};
 +static void apply_compile_boost() {
 +#ifdef __SWITCH__
 +  static uint32_t applied = 0;
 +  static s32 savedPriority = -1;
-+  const uint32_t want = g_compileBoost.load(std::memory_order_relaxed);
++  const uint32_t want =
++      (g_compileBoost.load(std::memory_order_relaxed) != 0 || g_compileBacklog.load(std::memory_order_relaxed)) ? 1u : 0u;
 +  if (want == applied) {
 +    return;
 +  }
@@ -230,7 +318,21 @@ index dfbba6023..ce9cdac28 100644
  static void pipeline_worker() {
  #ifdef TRACY_ENABLE
    tracy::SetThreadName("Pipeline compilation thread");
-@@ -1331,6 +1377,9 @@ static void pipeline_worker() {
+@@ -1327,10 +1415,23 @@ static void pipeline_worker() {
+       if (g_pipelineThreadEnd) {
+         break;
+       }
++      // mp2-nx: a room that just asked for many new pipelines boosts the compile thread until its
++      // queue drains (on at 8 waiting, off when empty); the game's draws skip them meanwhile anyway.
++      {
++        const size_t depth = g_pipelineQueue.size();
++        if (depth >= 8) {
++          g_compileBacklog.store(true, std::memory_order_relaxed);
++        } else if (depth == 0) {
++          g_compileBacklog.store(false, std::memory_order_relaxed);
++        }
++      }
+       auto& source = !g_pipelineQueue.empty() ? g_pipelineQueue : g_backgroundPipelineQueue;
        pending = std::move(source.front());
        source.pop_front();
      }
@@ -240,7 +342,7 @@ index dfbba6023..ce9cdac28 100644
      auto result = create_pipeline_timed(pending.hash, std::move(pending.create));
      {
        std::lock_guard lock{g_pipelineMutex};
-@@ -1724,10 +1773,29 @@ void initialize_pipeline_cache() {
+@@ -1724,10 +1825,29 @@ void initialize_pipeline_cache() {
      g_hasPipelineThread = false;
    } else {
      g_hasPipelineThread = true;
@@ -270,7 +372,7 @@ index dfbba6023..ce9cdac28 100644
      Log.info("pipeline cache: {} compile thread(s)", threads);
    }
  
-@@ -1750,6 +1818,12 @@ void shutdown_pipeline_cache() {
+@@ -1750,6 +1870,12 @@ void shutdown_pipeline_cache() {
        thread.join();
      }
      g_pipelineThreads.clear();
@@ -283,7 +385,7 @@ index dfbba6023..ce9cdac28 100644
    }
    g_hasPipelineThread = false;
  
-@@ -1943,3 +2017,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+@@ -1943,3 +2069,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
    stats->pending = static_cast<uint32_t>(g_pendingPipelines.size());
  }
  }
@@ -311,6 +413,22 @@ index 85783b60e..cbab58ad8 100644
                              },
                              worker_main};
  }
+diff --git a/lib/gfx/scan_peek.cpp b/lib/gfx/scan_peek.cpp
+index de077b862..6bb4da238 100644
+--- a/lib/gfx/scan_peek.cpp
++++ b/lib/gfx/scan_peek.cpp
+@@ -25,7 +25,11 @@ constexpr size_t SlotCount = 2;
+ constexpr uint32_t RowStrideAlignment = 256;
+ constexpr uint32_t BytesPerTexel = 4; // the EFB is RGBA8/BGRA8, the depth buffer R32Float
+ // How often a completed peek reports its id histogram; the first one always does.
++#if defined(__SWITCH__)
++constexpr uint64_t DiagnoseEvery = 512; // mp2-nx: 74 lines a session at 32, each an SD card write
++#else
+ constexpr uint64_t DiagnoseEvery = 32;
++#endif
+ 
+ enum class SlotState : uint8_t {
+   Available,
 diff --git a/lib/gfx/texture_replacement.cpp b/lib/gfx/texture_replacement.cpp
 index d918ce109..f4f634b88 100644
 --- a/lib/gfx/texture_replacement.cpp
@@ -343,6 +461,39 @@ index efddaaf2a..f667bc960 100644
                                   },
                                   worker_main};
  }
+diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
+index f9d2ad809..d3efd625a 100644
+--- a/lib/gx/shader.cpp
++++ b/lib/gx/shader.cpp
+@@ -1,3 +1,4 @@
++#include <chrono>
+ #include "../gfx/hash.hpp"
+ #include "../gfx/hdr_tone.hpp"
+ #include "../gfx/probe.hpp"
+@@ -29,6 +30,9 @@
+ #include "tracy/Tracy.hpp"
+ 
+ namespace aurora::gx {
++// mp2-nx: time spent in build_shader (WGSL generation and Dawn's CreateShaderModule, which parses it) on
++// this thread, so the pipeline compile log can split it from the rest (Tint's SPIR-V and the driver).
++thread_local uint64_t g_buildShaderNs = 0;
+ using namespace fmt::literals;
+ using namespace std::string_literals;
+ using namespace std::string_view_literals;
+@@ -4981,6 +4985,13 @@ bool shader_overridden(u64 hash) noexcept {
+ 
+ wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlphaMode) noexcept {
+   ZoneScoped;
++  struct BuildTimer {
++    std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++    ~BuildTimer() {
++      g_buildShaderNs += static_cast<uint64_t>(
++          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
++    }
++  } buildTimer;
+   auto shaderSource = build_shader_source(config);
+   if (!apply_dst_alpha_mode(shaderSource, dstAlphaMode)) {
+     dstAlphaMode = DstAlphaMode::None;
 diff --git a/lib/input.cpp b/lib/input.cpp
 index adb5c1f57..7fa852747 100644
 --- a/lib/input.cpp

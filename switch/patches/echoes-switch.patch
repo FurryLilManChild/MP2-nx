@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..c6462d83c 100644
+index ef1c8c60d..34fecd705 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..c6462d83c 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,41 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,50 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -53,7 +53,16 @@ index ef1c8c60d..c6462d83c 100644
 +            SQLITE_OMIT_LOAD_EXTENSION=1)
 +    endif()
 +    nx_generate_nacp(mp2-nx.nacp NAME "Metroid Prime 2: Echoes" AUTHOR "mp2-nx" VERSION "0.1.0")
-+    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp ICON ${MP2NX_ROOT}/switch/res/icon.jpg OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
++    # The starter shader list (initial_pipeline_cache.db, made from the owner's own caches) is game-derived, so it
++    # lives outside the repo: MP2NX_ROMFS_DIR, default <build>/../romfs. romfs:/ is Aurora's resources path.
++    set(MP2NX_ROMFS_DIR "${CMAKE_BINARY_DIR}/../romfs" CACHE PATH "romfs folder for the NRO (outside the repo)")
++    if(EXISTS "${MP2NX_ROMFS_DIR}")
++        nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp ICON ${MP2NX_ROOT}/switch/res/icon.jpg
++            ROMFS ${MP2NX_ROMFS_DIR} OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
++    else()
++        nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp ICON ${MP2NX_ROOT}/switch/res/icon.jpg
++            OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
++    endif()
 +endif()
 diff --git a/platform/debug_ui/window.cpp b/platform/debug_ui/window.cpp
 index 2b05502ac..c9b72c552 100644
@@ -370,3 +379,16 @@ index de0044446..2a49a83db 100644
  #ifdef TARGET_PC
    // Skip ride: the load is done once the loader asks the text to fade (StartTextFadeOut).
    if (mPortSkipRide && mStopSoon) {
+diff --git a/src/MetroidPrime/ScriptObjects/CScriptDock.cpp b/src/MetroidPrime/ScriptObjects/CScriptDock.cpp
+index 18b33af94..5d8f31c0e 100644
+--- a/src/MetroidPrime/ScriptObjects/CScriptDock.cpp
++++ b/src/MetroidPrime/ScriptObjects/CScriptDock.cpp
+@@ -57,7 +57,7 @@ void CScriptDock::Touch(CActor& actor, CStateManager& mgr) {
+ 
+   if (TCastToPtr< CPlayer >(actor)) {
+     mDockState = kDS_PlayerTouched;
+-#ifdef TARGET_PC
++#if defined(TARGET_PC) && !defined(__SWITCH__) // mp2-nx: every frame Samus touches a dock (328 lines in one session)
+     std::fprintf(stderr, "[dock] player touched dock %d (area %d -> %d)\n", mDock,
+                  GetCurrentAreaId().Value(), mArea.Value());
+ #endif

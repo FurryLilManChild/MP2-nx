@@ -505,7 +505,8 @@ std::vector< Row > BuildRows(int page) {
                     nullptr});
     rows.push_back({"Fast Morph", OnOff(sFastMorph), "Morph ball without the camera pulling back first",
                     [](int d) { Toggle(sFastMorph, d); }, nullptr});
-    rows.push_back({"Spring Ball", OnOff(sSpringBall), "Jump in morph ball (from Metroid Prime 3)",
+    rows.push_back({"Spring Ball", OnOff(sSpringBall),
+                    "Jump in morph ball: right stick up (L too with Twin stick). Needs the Morph Ball Bombs",
                     [](int d) { Toggle(sSpringBall, d); }, nullptr});
     rows.push_back({sConfirmTitle ? "Return to title: press A again" : "Return to title", "",
                     "Unsaved progress is lost", nullptr, [] {
