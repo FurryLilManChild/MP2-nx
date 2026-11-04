@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-11-03: switch-test1 result
+
+- Boot reached Echoes' settings and folder setup (takeover check passed, 3189 MiB, the .rvz found, MP2_* paths used),
+  then `port: uncaught C++ exception in std::terminate` right after the storage report thread. No crash.txt: not a
+  CPU exception, the terminate handler logged it and exited.
+- Cause (base-skill known issue, missed at bring-up): libnx's pthread_detach returns ENOSYS, so
+  `std::thread(...).detach()` in port_storage_report.cpp throws and the joinable std::thread terminates.
+- Fix for test2 (built after the owner's go-ahead): `switch/source/platform/pthread_wrap.cpp` wraps pthread_detach (returns
+  0) and pthread_create (1 MiB stack when no attributes); the terminate handler now logs the call stack as program
+  offsets.
+
 ## 2026-11-03: first NRO (switch-test1, boot test)
 
 - Linked: `mp2-nx.nro` 61.6 MB, sha256 44a729b1acd49e945acdeb00ed3d9754d5ea9bd5f355d3540da766cf024cd8b4. Symbols-only

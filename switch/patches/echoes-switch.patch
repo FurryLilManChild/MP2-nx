@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..7d0fc279c 100644
+index ef1c8c60d..380c95dbf 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..7d0fc279c 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,29 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,32 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -30,7 +30,10 @@ index ef1c8c60d..7d0fc279c 100644
 +    target_sources(metroid_prime2_port PRIVATE
 +        ${MP2NX_ROOT}/switch/source/platform/startup.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp
++        ${MP2NX_ROOT}/switch/source/platform/pthread_wrap.cpp)
++    target_link_options(metroid_prime2_port PRIVATE
++        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.

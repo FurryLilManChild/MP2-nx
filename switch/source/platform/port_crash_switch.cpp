@@ -7,16 +7,36 @@
 
 #include <switch.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cxxabi.h>
 #include <exception>
 #include <string>
 #include <typeinfo>
+#include <unwind.h>
+
+extern "C" char __start__;  // libnx: the start of the program image
 
 namespace PortCrash {
 namespace {
 void (*sAfterReport)(int, const void*) = nullptr;
+
+// The call stack as program offsets, which addr2line resolves against the ELF.
+_Unwind_Reason_Code trace_frame(_Unwind_Context* ctx, void* arg) {
+  int& depth = *static_cast<int*>(arg);
+  const uintptr_t pc = _Unwind_GetIP(ctx);
+  const uintptr_t base = reinterpret_cast<uintptr_t>(&__start__);
+  if (pc >= base) {
+    std::fprintf(stderr, "port:   #%d program +0x%lx\n", depth, static_cast<unsigned long>(pc - base));
+  }
+  return ++depth < 40 ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+
+void log_stack() {
+  int depth = 0;
+  _Unwind_Backtrace(trace_frame, &depth);
+}
 
 [[noreturn]] void log_and_exit(const char* where) {
   std::string what = "not a std::exception";
@@ -36,6 +56,7 @@ void (*sAfterReport)(int, const void*) = nullptr;
     type = demangled != nullptr ? demangled : info->name();
   }
   std::fprintf(stderr, "port: uncaught C++ exception in %s: %s: %s\n", where, type, what.c_str());
+  log_stack();
   std::fflush(stdout);
   std::fflush(stderr);
   if (sAfterReport != nullptr) {
