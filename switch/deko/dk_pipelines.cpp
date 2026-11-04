@@ -420,6 +420,11 @@ extern "C" {
 WGPUShaderModule __wrap_wgpuDeviceCreateShaderModule(WGPUDevice device, WGPUShaderModuleDescriptor const* d) {
     WGPUShaderModule m = __real_wgpuDeviceCreateShaderModule(device, d);
     if (!m || !d || !on() || !swdk::R.device) return m;
+    // (Dawn returns a cached module for the same source with one more reference: its shadow takes it)
+    if (Mod* existing = find(g_modules, m)) {
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        return m;
+    }
     for (const WGPUChainedStruct* c = d->nextInChain; c; c = c->next) {
         if (c->sType != WGPUSType_ShaderSourceWGSL) continue;
         auto* mod = new Mod;
@@ -447,6 +452,11 @@ void __wrap_wgpuShaderModuleRelease(WGPUShaderModule module) {
 WGPURenderPipeline __wrap_wgpuDeviceCreateRenderPipeline(WGPUDevice device, WGPURenderPipelineDescriptor const* d) {
     WGPURenderPipeline p = __real_wgpuDeviceCreateRenderPipeline(device, d);
     if (!p || !d || !on() || !swdk::R.device) return p;
+    // (Dawn returns a cached pipeline for an equal descriptor with one more reference: its shadow takes it)
+    if (RPipe* existing = find(g_pipelines, p)) {
+        pipeline_retain(existing);
+        return p;
+    }
     auto* pipe = new RPipe;
     pipe->handle = p;
     note("pipeline build (compile thread)");

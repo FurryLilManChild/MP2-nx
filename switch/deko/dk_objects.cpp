@@ -519,6 +519,13 @@ void __wrap_wgpuTextureRelease(WGPUTexture texture) {
 WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureViewDescriptor const* d) {
     WGPUTextureView v = __real_wgpuTextureCreateView(texture, d);
     if (!R.device) return v;
+    // mp2-nx (deko-9): Dawn hands back a cached object for an equal descriptor (views, samplers, layouts,
+    // shader modules, pipelines) with one more reference; its shadow takes that reference instead of being
+    // replaced by a new one (a replaced shadow died at the first release while Aurora still used it)
+    if (View* existing = find(g_views, v); existing && existing->magic == kAlive) {
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        return v;
+    }
     Tex* t = find(g_textures, texture);
     if (!v || !t) return v;
     auto* view = new View;
@@ -573,6 +580,13 @@ void __wrap_wgpuTextureViewRelease(WGPUTextureView view) {
 WGPUSampler __wrap_wgpuDeviceCreateSampler(WGPUDevice device, WGPUSamplerDescriptor const* d) {
     WGPUSampler s = __real_wgpuDeviceCreateSampler(device, d);
     if (!s || !R.device) return s;
+    // mp2-nx (deko-9): Dawn hands back a cached object for an equal descriptor (views, samplers, layouts,
+    // shader modules, pipelines) with one more reference; its shadow takes that reference instead of being
+    // replaced by a new one (a replaced shadow died at the first release while Aurora still used it)
+    if (Samp* existing = find(g_samplers, s); existing && existing->magic == kAlive) {
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        return s;
+    }
     auto* samp = new Samp;
     samp->handle = s;
     DkSampler& k = samp->sampler;
@@ -669,6 +683,10 @@ extern "C" {
 WGPUBindGroupLayout __wrap_wgpuDeviceCreateBindGroupLayout(WGPUDevice device, WGPUBindGroupLayoutDescriptor const* d) {
     WGPUBindGroupLayout l = __real_wgpuDeviceCreateBindGroupLayout(device, d);
     if (!l || !d || !R.device) return l;
+    if (Layout* existing = find(g_layouts, l)) {  // (a cached layout, see the views above)
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        return l;
+    }
     auto* layout = new Layout;
     for (size_t i = 0; i < d->entryCount; i++)
         if (d->entries[i].buffer.hasDynamicOffset) layout->dynamic.push_back(d->entries[i].binding);
