@@ -2,6 +2,37 @@
 
 Newest first.
 
+## 2026-11-04: deko3d phase 1, tests deko-1 to deko-11
+
+The phase 1 renderer (docs/deko3d-phase1-design.md): Aurora's device is Dawn's Null device and its WebGPU calls
+are wrapped and replayed into deko3d. Builds are mp2-nx-deko (own folder), chosen in the menu, falling back to
+Vulkan after two starts with no picture. Logs from C:\MP2-nx\out\sd\switch\dekologs.
+- deko-1: abort at start. Cause: Aurora made an SDL renderer for the Null backend. Fix: in deko3d mode Aurora is
+  told the backend is Vulkan (same WGSL, no SDL renderer). Also the portlibs include path (zlib.h).
+- deko-2: crash on loading a save; crash.txt was empty. Cause: the crash handler wrote past the end of the file and
+  read the base address as 0. Fix: the file is created at its size, the base comes from svcQueryMemory.
+- deko-3: null DkImageView in dkCmdBufBindRenderTargets. Cause: passes with empty colour slots. Fix: trailing
+  empty slots are left unbound, middle ones get a scratch image.
+- deko-4 to deko-7: heap corruption at the scan visor. Robustness turned on for buffers and copies bounds-checked
+  (no change); a graveyard for released shadows then logged dead views. Cause: Dawn hands back a cached object for
+  an equal descriptor (views, samplers, layouts, modules, pipelines) and the bridge made a second shadow for it,
+  freed at the first release. Fix: the existing shadow takes the extra reference.
+- deko-8/9: 11 pipelines failed in Tint ("texture missing from texture_builtins_from_uniform list"). Fix:
+  dawn-switch-tint-robustness-buffers-only.patch; it only took effect once the monolithic Dawn library, which has
+  its own copy of the GLSL writer, was rebuilt from the patched tree.
+- deko-10: plays. Scan visor, a boss, a cutscene and a save room, about 12M draws, none skipped, no failed
+  pipelines, 55 to 60 fps, no crash. Wrong: normal shots leave white squares on walls (charge shots are right),
+  some enemy shadows are white squares, the save room has white areas where Vulkan shows effects.
+- deko-11 (fixes from reading Aurora's code; the log had no errors for these): (1) a view's deko3d type now follows
+  the view dimension: cube probes (6-layer 2D textures viewed as cubes) and the VFX path's one-layer textures
+  viewed as 2D arrays were sampled through a descriptor of the image's type. (2) New textures are zeroed by the next
+  submit, ahead of their writes, as Dawn's are: the image heap hands back memory earlier textures used, and some
+  textures (the empty PBR lightmap) are never written. Depth textures are left to their passes' clears.
+  (3) deko3d_env.txt in the app folder sets variables before Aurora reads them, for A/B tests without a build
+  (next suspect if squares remain: dual-source blending, AURORA_DUAL_SOURCE=0).
+- Noted: the Null device still allocates about 440 MiB of its own (buffers 270, textures 170) that deko3d mode
+  never uses; worth removing later.
+
 ## 2026-11-04: deko3d phase 0 result (console)
 
 The owner ran mp2-nx-deko with the smoke test on (logs in C:\MP2-nx\out\sd\switch\dekologs). It booted and played
