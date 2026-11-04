@@ -195,6 +195,31 @@ index a3d106a14..1a7fddffd 100644
      PortMemoryLog::SetPipelinePressure(trimMib, severeMib);
      if (std::getenv("MP2_PIPELINE_TRIM_MIB") != nullptr ||
          std::getenv("MP2_PIPELINE_TRIM_SEVERE_MIB") != nullptr) {
+diff --git a/platform/port_harness.cpp b/platform/port_harness.cpp
+index 502c3304b..ea42482d8 100644
+--- a/platform/port_harness.cpp
++++ b/platform/port_harness.cpp
+@@ -6,6 +6,8 @@
+ #include "port_overlay.h"
+ #include "port_timing.h"
+ 
++#include <aurora/aurora.h>
++
+ #include <atomic>
+ #include <chrono>
+ #include <cstdio>
+@@ -136,6 +138,11 @@ void IdleCheck() {
+     // and is not a stall.
+     return;
+   }
++  if (aurora_is_suspended()) {
++    // HOME menu, sleep or a system dialog: no updates are expected (mp2-nx, the owner's test7 logs).
++    sLastUpdateSeconds = Seconds();
++    return;
++  }
+   const double idle = Seconds() - sLastUpdateSeconds;
+   if (sWarned || idle < kIdleWarnSeconds) {
+     return;
 diff --git a/platform/port_memory_log.cpp b/platform/port_memory_log.cpp
 index 866538a59..7ae458a8c 100644
 --- a/platform/port_memory_log.cpp

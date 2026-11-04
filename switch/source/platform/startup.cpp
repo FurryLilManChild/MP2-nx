@@ -20,6 +20,7 @@
 
 // SQLite for the pipeline and Dawn caches on Horizon (sqlite_switch.cpp).
 extern "C" void mp2nx_sqlite_setup(void);
+extern "C" void mp2nx_install_suspend_hook(void);
 
 extern "C" {
 
@@ -141,6 +142,7 @@ extern "C" void userAppInit(void) {
   }
 
   mp2nx_sqlite_setup();
+  mp2nx_install_suspend_hook(); // misc_switch.cpp
   // Not SDL_AUDIO_DEVICE_SAMPLE_FRAMES=4096 (Dusklight's crackle fix): Echoes keeps only 64 ms
   // queued (platform/ai_dma.cpp kTargetQueuedBytes) and a 4096-frame device pull is about 85 ms,
   // so it ran dry on every pull (test6c: choppy audio throughout).

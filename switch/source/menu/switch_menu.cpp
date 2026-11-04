@@ -363,6 +363,16 @@ bool AssignButton(Action action, const PortInput::Input& in) {
       ReplacePad(profile, inherited, e.action, oldInput); // the swap
     }
   }
+  // The analog halves of the GameCube's L and R ride along with their clicks: one left on a
+  // button taken for something else would still press it (test7: Fire on ZR also pulled the
+  // analog R, which is free aim, and Samus stood still while charging).
+  for (const Action analog : {Action::LAnalog, Action::RAnalog}) {
+    const auto inputs = CurrentPadInputs(analog);
+    if (std::any_of(inputs.begin(), inputs.end(),
+                    [&](const PortInput::Input& x) { return PortInput::SamePhysicalInput(x, in); })) {
+      ReplacePad(profile, inherited, analog, PortInput::Input{});
+    }
+  }
   ReplacePad(profile, inherited, action, in);
   const bool ok = PortInputDevices::SetUserBindings(work);
   std::fprintf(stderr, "mp2-nx: menu: %s -> %s (%s)\n", std::string(PortInput::Info(action).label).c_str(),

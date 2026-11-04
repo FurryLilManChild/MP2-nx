@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 2026-11-04: test7 result, test8
+
+- Test7 logs: the starter list merged once (1,282 rows, 3,018 uses) and the next start skipped it ("already merged").
+  64 new pipelines in play (test6d session: 208), worst context 8,171 skipped draws (was 185,483). Startup prepares
+  1,282 to 1,456 in 40 to 52 s in the background. Compile split: build_shader (WGSL and parse) is 15 to 20 percent;
+  about 80 percent is Dawn's Tint to SPIR-V plus NVK. Texture memory followed loaded areas (peak 461 MiB, free heap
+  1.2 GB); the per-frame uploads go to the content cache, capped at 128 MB: not a leak.
+- Control bug (the owner, isolated by remapping): Fire on ZR made Samus stand still while charging, worse when locked on.
+  Cause: ZR carried GameCube R's click and its analog (free aim, which roots Samus); the Buttons page swapped the
+  click off ZR but not the analog. Fixes: Switch triggers bind only L/R's click (port_input_devices.cpp BindMapping),
+  and a remap also clears LAnalog/RAnalog from the button it takes.
+- An 83 s "no frame" stall and an 84 s "compile" were the console asleep and at the HOME menu (the owner). Now
+  misc_switch.cpp tracks focus changes and resumes through an applet hook (an epoch, plus 3 s after each);
+  aurora_is_suspended() reports it, so the watchdog and the harness stay quiet, and a compile that spans a suspension
+  is left out of the timings.
+- Test8 NRO sha256 3c08038e... in the SD folder. Next (the owner): a private test release, then deko3d.
+
 ## 2026-11-04: play-session logs, test7
 
 - Logs (test6d, longer play): boot prepared 575 cached pipelines in 23.6 s (test3: 271 in 35.7 s), so the load boost

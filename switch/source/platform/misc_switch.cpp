@@ -51,3 +51,33 @@ extern "C" void mp2nx_start_log_flusher(void) {
     }
   }).detach();
 }
+
+// Suspension (HOME menu, sleep, a system dialog). The owner (test7 logs): an 83-second "no frame" stall
+// and an 84-second "pipeline compile" were the console asleep or at the HOME menu, and they also
+// went into the compile totals. Applet hooks run on the thread that calls appletMainLoop (SDL's
+// event pump); each focus change or resume bumps an epoch, and the 3 s after one count as
+// suspended too, so a watchdog tick that wakes first does not see a stall.
+namespace {
+AppletHookCookie sFocusCookie;
+std::atomic<uint32_t> sSuspendEpoch{0};
+std::atomic<uint64_t> sLastAppletEventTick{0};
+void on_applet_event(AppletHookType hook, void*) {
+  if (hook == AppletHookType_OnFocusState || hook == AppletHookType_OnResume ||
+      hook == AppletHookType_OnOperationMode) {
+    sSuspendEpoch.fetch_add(1, std::memory_order_relaxed);
+    sLastAppletEventTick.store(armGetSystemTick(), std::memory_order_relaxed);
+  }
+}
+}  // namespace
+
+extern "C" void mp2nx_install_suspend_hook(void) { appletHook(&sFocusCookie, on_applet_event, nullptr); }
+
+extern "C" uint32_t mp2nx_switch_suspend_epoch(void) { return sSuspendEpoch.load(std::memory_order_relaxed); }
+
+extern "C" bool mp2nx_switch_suspended(void) {
+  if (appletGetFocusState() != AppletFocusState_InFocus) {
+    return true;
+  }
+  const uint64_t last = sLastAppletEventTick.load(std::memory_order_relaxed);
+  return last != 0 && armGetSystemTick() - last < armNsToTicks(3'000'000'000ULL);
+}

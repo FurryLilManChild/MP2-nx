@@ -12,6 +12,26 @@ index e640c6221..da641f71d 100644
  typedef struct {
    uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
    uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
+diff --git a/lib/aurora.cpp b/lib/aurora.cpp
+index b7f692cbf..2b143a69e 100644
+--- a/lib/aurora.cpp
++++ b/lib/aurora.cpp
+@@ -827,7 +827,15 @@ void aurora_shutdown() { aurora::shutdown(); }
+ const AuroraEvent* aurora_update() { return aurora::update(); }
+ bool aurora_begin_frame() { return aurora::begin_frame(); }
+ void aurora_release_lost_surface() { aurora::release_lost_surface(); }
++#if defined(__SWITCH__)
++extern "C" bool mp2nx_switch_suspended(void); // mp2-nx misc_switch.cpp: HOME, sleep, dialogs
++#endif
+ bool aurora_is_suspended() {
++#if defined(__SWITCH__)
++  if (mp2nx_switch_suspended()) {
++    return true;
++  }
++#endif
+   return aurora::window::is_backgrounded() || !aurora::window::is_surface_ready() ||
+          aurora::window::is_surface_changing();
+ }
 diff --git a/lib/card/CardGciFolder.cpp b/lib/card/CardGciFolder.cpp
 index 06973d1dd..ceb3c85e5 100644
 --- a/lib/card/CardGciFolder.cpp
@@ -131,7 +151,7 @@ index de8c3f93c..f02a1d834 100644
  const wgpu::Buffer& staging_buffer(size_t slot);
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index dfbba6023..9da71cce5 100644
+index dfbba6023..652379bd4 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
@@ -166,7 +186,7 @@ index dfbba6023..9da71cce5 100644
  static std::atomic_bool g_pipelineThreadEnd = false;
  static std::condition_variable g_pipelineQueueCv;
  static std::condition_variable g_pipelineReadyCv;
-@@ -479,10 +488,20 @@ static std::atomic<uint64_t> g_compileSlowestMs = 0;
+@@ -479,10 +488,35 @@ static std::atomic<uint64_t> g_compileSlowestMs = 0;
  static std::atomic<uint64_t> g_compileFailures = 0;
  constexpr int64_t kSlowPipelineMs = 200;
  
@@ -177,17 +197,32 @@ index dfbba6023..9da71cce5 100644
 +namespace aurora::gfx {
 +static std::atomic<uint64_t> g_compileShaderMs{0};
 +
++#if defined(__SWITCH__)
++extern "C" uint32_t mp2nx_switch_suspend_epoch(void);
++#endif
  static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineCallback&& create) {
++#if defined(__SWITCH__)
++  // A compile the console slept or sat at the HOME menu through is not a compile time.
++  const uint32_t epoch = mp2nx_switch_suspend_epoch();
++#endif
    const auto start = std::chrono::steady_clock::now();
 +  gx::g_buildShaderNs = 0;
    wgpu::RenderPipeline pipeline = create();
    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 +  const uint64_t shaderMs = gx::g_buildShaderNs / 1000000ull;
++#if defined(__SWITCH__)
++  if (epoch != mp2nx_switch_suspend_epoch()) {
++    if (!pipeline) {
++      Log.error("pipeline: creation failed (hash {:016x})", hash);
++    }
++    return pipeline;
++  }
++#endif
 +  g_compileShaderMs.fetch_add(shaderMs, std::memory_order_relaxed);
    const uint64_t count = g_compileCount.fetch_add(1, std::memory_order_relaxed) + 1;
    g_compileTotalMs.fetch_add(static_cast<uint64_t>(ms.count()), std::memory_order_relaxed);
    uint64_t slowest = g_compileSlowestMs.load(std::memory_order_relaxed);
-@@ -494,12 +513,13 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
+@@ -494,12 +528,13 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
      g_compileFailures.fetch_add(1, std::memory_order_relaxed);
      Log.error("pipeline: creation failed (hash {:016x})", hash);
    } else if (ms.count() > kSlowPipelineMs) {
@@ -205,7 +240,7 @@ index dfbba6023..9da71cce5 100644
    }
    return pipeline;
  }
-@@ -512,7 +532,12 @@ static void notify_pipeline_ready(bool queued) {
+@@ -512,7 +547,12 @@ static void notify_pipeline_ready(bool queued) {
                                                                     g_pipelineLoadStart)
                   .count());
      // Prune GPU cache entries after fully loading the pipeline cache.
@@ -218,7 +253,7 @@ index dfbba6023..9da71cce5 100644
    }
    g_pipelineReadyCv.notify_all();
  }
-@@ -772,6 +797,7 @@ static void pipeline_cache_abort() {
+@@ -772,6 +812,7 @@ static void pipeline_cache_abort() {
    if (g_pipelineCacheDb != nullptr) {
      sqlite3_close(g_pipelineCacheDb);
      g_pipelineCacheDb = nullptr;
@@ -226,7 +261,7 @@ index dfbba6023..9da71cce5 100644
    }
    if (g_pipelineCacheCorrupt.exchange(false)) {
      Log.warn("Pipeline cache is damaged; deleting it");
-@@ -839,6 +865,28 @@ static void seed_pipeline_cache() {
+@@ -839,6 +880,28 @@ static void seed_pipeline_cache() {
    }
  
    const auto seedPath = pipeline_cache_seed_path();
@@ -255,7 +290,7 @@ index dfbba6023..9da71cce5 100644
    sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
    if (seedDb == nullptr) {
      return;
-@@ -952,6 +1000,12 @@ static void seed_pipeline_cache() {
+@@ -952,6 +1015,12 @@ static void seed_pipeline_cache() {
    if (!readFailed) {
      Log.info("Seeded pipeline cache from '{}' ({} rows merged, {} rows skipped, {} uses)", seedPath, mergedRows,
               skippedRows, mergedUses);
@@ -268,7 +303,7 @@ index dfbba6023..9da71cce5 100644
    }
  }
  
-@@ -971,7 +1025,7 @@ static bool prepare_pipeline_cache_db() {
+@@ -971,7 +1040,7 @@ static bool prepare_pipeline_cache_db() {
      return false;
    }
  
@@ -277,7 +312,7 @@ index dfbba6023..9da71cce5 100644
    if (ret != SQLITE_OK) {
      Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
      pipeline_cache_abort();
-@@ -1306,6 +1360,40 @@ static void pipeline_cache_writer() {
+@@ -1306,6 +1375,40 @@ static void pipeline_cache_writer() {
    }
  }
  
@@ -318,7 +353,7 @@ index dfbba6023..9da71cce5 100644
  static void pipeline_worker() {
  #ifdef TRACY_ENABLE
    tracy::SetThreadName("Pipeline compilation thread");
-@@ -1327,10 +1415,23 @@ static void pipeline_worker() {
+@@ -1327,10 +1430,23 @@ static void pipeline_worker() {
        if (g_pipelineThreadEnd) {
          break;
        }
@@ -342,7 +377,7 @@ index dfbba6023..9da71cce5 100644
      auto result = create_pipeline_timed(pending.hash, std::move(pending.create));
      {
        std::lock_guard lock{g_pipelineMutex};
-@@ -1724,10 +1825,29 @@ void initialize_pipeline_cache() {
+@@ -1724,10 +1840,29 @@ void initialize_pipeline_cache() {
      g_hasPipelineThread = false;
    } else {
      g_hasPipelineThread = true;
@@ -372,7 +407,7 @@ index dfbba6023..9da71cce5 100644
      Log.info("pipeline cache: {} compile thread(s)", threads);
    }
  
-@@ -1750,6 +1870,12 @@ void shutdown_pipeline_cache() {
+@@ -1750,6 +1885,12 @@ void shutdown_pipeline_cache() {
        thread.join();
      }
      g_pipelineThreads.clear();
@@ -385,7 +420,7 @@ index dfbba6023..9da71cce5 100644
    }
    g_hasPipelineThread = false;
  
-@@ -1943,3 +2069,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+@@ -1943,3 +2084,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
    stats->pending = static_cast<uint32_t>(g_pendingPipelines.size());
  }
  }
