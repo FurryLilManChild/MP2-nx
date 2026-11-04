@@ -2,6 +2,29 @@
 
 Newest first.
 
+## 2026-11-03: switch-test3 result, test4 (saves, Switch menu, save states)
+
+- Test3: both caches opened (`SQLite cache init succeeded`, 100 pipelines compiled and stored), so the SQLite VFS fix
+  works; the second launch is the real cache test. The owner: the menu opens and closes with + and - but neither the pad
+  nor the touch screen does anything in it.
+- Saving still failed: the card is a GCI folder (`user/USA/Card A`), not a raw image. Test2 created the
+  `MetroidPrime2` file but its data write failed, so test3 found it with no comment (CMemoryCardDriver::IndexFiles:
+  kE_FileCorrupted) and tried to delete it. CardGciFolder::deleteFile moves the file into `Card A/_deleted` with
+  SDL_RenamePath, which failed three times (`Failed to delete file at idx: 0`), most likely the FAT rename-onto-existing
+  refusal again with a copy already in `_deleted`.
+- Fix: `switch/source/platform/rename_wrap.cpp`, linked with `-Wl,--wrap=rename`, so every rename in the program
+  (std::filesystem::rename, std::rename, SDL_RenamePath; about 20 save paths: card, settings, bindings, save states)
+  replaces an existing target: old moved aside, new renamed in, old removed; restored on failure, logged with errno.
+  objdump shows no direct `rename` call left outside the wrapper.
+- Menu: per the owner, a Switch-native menu replaces Echoes' F1 window instead of fixing its input:
+  `switch/source/menu/switch_menu.cpp` (built into mp_port_audio, hooked in debug_ui/window.cpp DrawUI). libnx pad and
+  touch input, drawn with ImGui draw lists only (no ImGui nav or focus). Pages: Game (resume, skip cutscenes, Fast
+  Morph, Spring Ball, return to title), Save states (8 slots with room and play time, save, load, undo), Controls
+  (twin stick, stick aim speed, invert aim, crosshair, lock-on toggle, sticky charge, auto-aim, map invert), Video
+  (resolution for handheld and for docked, applied on mode change; dynamic resolution; FPS counter; MSAA; anisotropy;
+  aspect; FOV; HUD size; black bars; hide helmet), System. Settings go to Echoes' settings.cfg; the per-mode
+  resolution and the FPS counter to `sdmc:/switch/mp2-nx/switch_menu.cfg`. Button remapping is not in it yet.
+
 ## 2026-11-03: switch-test2 result, test3 prepared
 
 - Booted to gameplay on hardware: Vulkan on NVK, the REL arena below 4 GiB, the .rvz reader and input all work. The owner:

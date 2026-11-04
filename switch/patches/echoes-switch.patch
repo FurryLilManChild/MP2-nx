@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..8f8621015 100644
+index ef1c8c60d..4d211c661 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..8f8621015 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,34 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,38 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -32,10 +32,14 @@ index ef1c8c60d..8f8621015 100644
 +        ${MP2NX_ROOT}/switch/source/platform/low_arena.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/posix_stubs.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/pthread_wrap.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/sqlite_switch.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/sqlite_switch.cpp
++        ${MP2NX_ROOT}/switch/source/platform/rename_wrap.cpp)
++    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
++    set_source_files_properties(${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp PROPERTIES
++        INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui)
 +    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
 +    target_link_options(metroid_prime2_port PRIVATE
-+        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create)
++        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME mp2-nx)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
@@ -48,6 +52,61 @@ index ef1c8c60d..8f8621015 100644
 +    nx_generate_nacp(mp2-nx.nacp NAME "Metroid Prime 2: Echoes" AUTHOR "mp2-nx" VERSION "0.1.0")
 +    nx_create_nro(metroid_prime2_port NACP mp2-nx.nacp OUTPUT ${CMAKE_BINARY_DIR}/mp2-nx.nro)
 +endif()
+diff --git a/platform/debug_ui/window.cpp b/platform/debug_ui/window.cpp
+index 2b05502ac..c9b72c552 100644
+--- a/platform/debug_ui/window.cpp
++++ b/platform/debug_ui/window.cpp
+@@ -25,6 +25,14 @@
+ 
+ namespace PortDebug {
+ 
++#if defined(__SWITCH__)
++// mp2-nx: the Switch menu (mp2-nx switch/source/menu/switch_menu.cpp) replaces the F1 window.
++namespace SwitchMenu {
++void DrawAlways();
++bool Draw();
++} // namespace SwitchMenu
++#endif
++
+ namespace {
+ 
+ bool IsResizeGrip(ImGuiWindow* window, ImGuiID id) {
+@@ -488,7 +496,9 @@ void DrawUI() {
+   if (PortOverlaySettings::Dirty() && ImGui::GetCurrentContext() != nullptr && !ImGui::IsAnyItemActive()) {
+     PortOverlaySettings::SaveSettings();
+   }
++#if !defined(__SWITCH__)
+   UpdateControllerNav();
++#endif
+   // MP2_DEBUG_TAB=<page> opens the window on its first frame, not just preselects the page.
+   static bool sStartOpenPending = true;
+   if (sStartOpenPending) {
+@@ -521,6 +531,9 @@ void DrawUI() {
+   DrawUpdateToast();
+   DrawNoteToast();
+   DrawPhotoUI();
++#if defined(__SWITCH__)
++  SwitchMenu::DrawAlways();
++#endif
+ #if defined(PORT_TOUCH_OVERLAY)
+   DrawTouchOverlay();
+ #endif
+@@ -530,11 +543,15 @@ void DrawUI() {
+     return;
+   }
+ 
++#if defined(__SWITCH__)
++  const bool open = SwitchMenu::Draw();
++#else
+   UpdateTouchScroll();
+   BeginSearchJump();
+   const bool open = PageLayout() ? DrawPageWindow() : DrawDesktopWindow();
+   EndSearchJump();
+   ClearTouchHover();
++#endif
+ 
+   if (!open) {
+     sVisible = false;
 diff --git a/platform/rel.cpp b/platform/rel.cpp
 index f4ff077ce..298a34ddb 100644
 --- a/platform/rel.cpp
