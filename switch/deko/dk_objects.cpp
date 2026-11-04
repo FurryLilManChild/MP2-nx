@@ -192,6 +192,7 @@ Tex* make_texture(WGPUTexture handle, const WGPUTextureDescriptor& d) {
     t->mips = std::max<uint32_t>(d.mipLevelCount, 1);
     t->samples = std::max<uint32_t>(d.sampleCount, 1);
     t->usage = d.usage;
+    t->is3d = d.dimension == WGPUTextureDimension_3D;
     t->label = label_of(d.label);
     const FormatInfo f = format_info(d.format);
     t->format = f.format;
@@ -500,6 +501,8 @@ WGPUTexture __wrap_wgpuDeviceCreateTexture(WGPUDevice device, WGPUTextureDescrip
         g_stats.textures++;
         g_stats.texturesCreated++;
         if (shadow->valid) g_stats.imageBytes += shadow->mem.size;
+        lock.unlock();
+        if (shadow->valid) mp2dk::texture_zero_later(shadow);
     }
     return t;
 }
@@ -544,10 +547,28 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
         const FormatInfo f = format_info(d->format);
         if (f.format != DkImageFormat_None) view->view.format = f.format;
     }
-    if (d && d->arrayLayerCount != WGPU_ARRAY_LAYER_COUNT_UNDEFINED && t->layers > 1) {
+    // mp2-nx (deko-11): the view's type is the view dimension, not the image's. The shader's sampler type
+    // follows the view (a cube probe is a 6-layer 2D texture viewed as a cube; the VFX path views a
+    // one-layer 2D texture as a 2D array), and a descriptor of another type samples nothing sensible.
+    if (d && t->layers > 1 && !t->is3d && d->baseArrayLayer < t->layers) {
         view->view.layerOffset = uint16_t(d->baseArrayLayer);
-        view->view.layerCount = uint16_t(d->arrayLayerCount);
-        if (d->dimension == WGPUTextureViewDimension_2D) view->view.type = DkImageType_2D;
+        const uint32_t left = t->layers - d->baseArrayLayer;
+        view->view.layerCount = uint16_t(d->arrayLayerCount != WGPU_ARRAY_LAYER_COUNT_UNDEFINED
+                                             ? std::min(d->arrayLayerCount, left)
+                                             : left);
+    }
+    if (d && t->valid) {
+        switch (d->dimension) {
+        case WGPUTextureViewDimension_2D: view->view.type = DkImageType_2D; break;
+        case WGPUTextureViewDimension_2DArray: view->view.type = DkImageType_2DArray; break;
+        case WGPUTextureViewDimension_Cube:
+            if (t->layers >= 6) view->view.type = DkImageType_Cubemap;
+            break;
+        case WGPUTextureViewDimension_CubeArray:
+            if (t->layers >= 6) view->view.type = DkImageType_CubemapArray;
+            break;
+        default: break;  // 3D, 1D, undefined: the image's own type
+        }
     }
     if (d && d->aspect == WGPUTextureAspect_StencilOnly) view->view.dsSource = DkDsSource_Stencil;
     for (const WGPUChainedStruct* c = d ? d->nextInChain : nullptr; c; c = c->next) {

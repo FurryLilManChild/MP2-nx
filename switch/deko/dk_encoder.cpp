@@ -198,6 +198,7 @@ uint64_t g_ringIds = 0;
 // queue ops waiting for the next submit (g_submitMutex)
 struct QueueOp {
     bool texture = false;
+    bool zero = false;  // mp2-nx (deko-11): zero the whole texture (a new one), from g_zero
     Buf* buf = nullptr;
     Tex* tex = nullptr;
     uint64_t dstOffset = 0;
@@ -209,6 +210,9 @@ struct QueueOp {
     uint64_t ringId = 0;  // its ring use (0: none)
 };
 std::vector<QueueOp> g_queueOps;
+// mp2-nx (deko-11): zeros, the source of new textures' first copy
+constexpr uint32_t kZeroSize = 4u << 20;
+swdk::Block g_zero;
 
 void submit_locked(const char* why);
 
@@ -740,11 +744,37 @@ void replay(Replay& r, Enc* e) {
     end_pass(r);  // (a pass Aurora never ended)
 }
 
+// mp2-nx (deko-11): every level and layer of a new texture copied from zeros, a band of rows at a time
+// (Dawn's textures start as zeros; without this a texture read before it is fully written, such as an
+// empty lightmap or a target first loaded, showed whatever an earlier texture left in that memory).
+// Depth and stencil textures are left out: their passes clear them.
+void zero_texture(Replay& r, Tex* t) {
+    if (!g_zero || !t || !t->valid || t->external || t->depth) return;
+    for (uint32_t m = 0; m < t->mips; m++) {
+        const uint32_t lw = level_size(t->width, m), lh = level_size(t->height, m);
+        const uint32_t blocksW = (lw + t->blockW - 1) / t->blockW, blocksH = (lh + t->blockH - 1) / t->blockH;
+        const uint32_t pitch = (blocksW * t->blockBytes + 255u) & ~255u;
+        if (pitch == 0 || pitch > kZeroSize) continue;
+        const uint32_t band = std::max<uint32_t>(kZeroSize / pitch, 1);
+        const uint32_t layers = t->is3d ? level_size(t->layers, m) : t->layers;
+        for (uint32_t z = 0; z < layers; z++)
+            for (uint32_t y = 0; y < blocksH; y += band) {
+                const uint32_t rows = std::min(band, blocksH - y);
+                const WGPUOrigin3D o{0, y * t->blockH, z};
+                const WGPUExtent3D e{lw, std::min(rows * t->blockH, lh - y * t->blockH), 1};
+                buffer_to_image(r, g_zero.gpu, pitch, rows, t, m, o, e);
+            }
+    }
+}
+
 void replay_queue_ops(Replay& r) {
     if (g_queueOps.empty()) return;
     note("replay: queue writes");
     for (QueueOp& q : g_queueOps) {
-        if (q.texture) {
+        if (q.zero) {
+            zero_texture(r, q.tex);
+            tex_release(q.tex);
+        } else if (q.texture) {
             buffer_to_image(r, q.src, q.rowBytes, q.rows, q.tex, q.mip, q.origin, q.extent);
             tex_release(q.tex);
         } else {
@@ -868,6 +898,8 @@ void serial_wait(uint64_t serial) {
 
 void encoder_init() {
     g_ring = swdk::block_create(kRingSize, "upload ring (queue writes)");
+    g_zero = swdk::block_create(kZeroSize, "zeros (new textures)");
+    if (g_zero) memset(g_zero.cpu, 0, kZeroSize);
     log("encoder: WebGPU encoders recorded here and replayed into deko3d at each submit; upload ring %u MiB, %u "
         "submit fences",
         kRingSize >> 20, kFenceRing);
@@ -875,6 +907,16 @@ void encoder_init() {
 
 // dk_surface.cpp: the present's commands go after everything submitted (g_submitMutex held by the caller)
 std::mutex& submit_mutex() { return g_submitMutex; }
+void texture_zero_later(Tex* t) {
+    if (!t || !t->valid || t->external || t->depth || !g_zero) return;
+    QueueOp q;
+    q.zero = true;
+    q.tex = t;
+    tex_retain(t);
+    std::lock_guard<std::mutex> lock(g_submitMutex);
+    queue_push(q);
+}
+
 void flush_locked(const char* why) {
     if (!g_queueOps.empty()) submit_locked(why);
 }

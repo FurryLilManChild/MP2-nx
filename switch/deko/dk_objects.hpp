@@ -28,8 +28,12 @@
 
 #include "dk.h"
 
+namespace aurora::gfx::dk { struct Tex; }
 namespace mp2dk {
 struct Buf;  // dk_bridge.hpp
+// mp2-nx (deko-11, dk_encoder.cpp): a new texture's memory is zeroed by the next submit, ahead of its
+// writes (Dawn's textures start as zeros; the image heap hands back memory other textures used)
+void texture_zero_later(aurora::gfx::dk::Tex* t);
 }
 
 namespace aurora::gfx::dk {
@@ -49,6 +53,7 @@ struct Tex {
     uint64_t usage = 0;
     bool depth = false, compressed = false, valid = false;
     bool external = false;  // mp2-nx: the image is a swapchain image (not ours to free)
+    bool is3d = false;      // mp2-nx (deko-11): a 3D texture (its depth is not layers)
     uint8_t blockW = 1, blockH = 1, blockBytes = 4;
     DkImage image{};
     swdk::ImageAlloc mem;
