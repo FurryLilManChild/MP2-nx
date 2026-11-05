@@ -2,6 +2,20 @@
 
 Newest first.
 
+## 2026-11-04: deko-14b result (paused here)
+
+- One boot, 8-mode cycle. The log shows "0 depth textures cleared": texture_zero_later (dk_encoder.cpp) still
+  returns for depth textures, so zero_texture's depth branch never ran. The leftover-depth theory is untested.
+- Per-mode counts are printed one line late (each "hid N" belongs to the previous mode).
+- Hidden draws in Temple Grounds: screen-reading blends 0, dual-source 0, constant about 600, all blended about
+  235k of 275k (Aurora marks most GX draws blended, so that mode is too broad). Census: 1085 pipelines, 890
+  blended, 2 read the destination, 16 dual-source, 530 constant.
+- This boot most whitewash was gone (luck of the boot, not a fix). One spot still wrong: grey strips in the
+  door room, unchanged in modes 1 to 7, black in mode 8 (a blended layer over black, wrong colour).
+- Next (deko-15, waiting on the owner's Vulkan photo of the strips): drop the depth filter in texture_zero_later;
+  fix the count labels; replace the blend modes with narrower ones (additive, alpha, draws sampling a texture
+  rendered during play such as cube probes) and log the pipeline that draws the strips.
+
 ## 2026-11-04: deko-14b
 
 - Anti-aliasing ruled out: the owner's setting was already off (the "asks for 4 samples" log line is a clear
