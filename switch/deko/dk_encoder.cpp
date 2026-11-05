@@ -26,6 +26,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <vector>
+#include <memory>
+#include <string>
+#include <thread>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -1113,7 +1116,14 @@ void cycle_tick() {
     }
     if (!g_cycleOn) return;
     if (g_cycleSeconds) {
-        const uint64_t s = armTicksToNs(armGetSystemTick() - g_cycleStart) / 1'000'000'000ull;
+        // deko-16b: the cycle starts kCycleDelay seconds after the first present (time to get past the menus)
+        constexpr uint64_t kCycleDelay = 30;
+        const uint64_t since = armTicksToNs(armGetSystemTick() - g_cycleStart) / 1'000'000'000ull;
+        if (since < kCycleDelay) {
+            snprintf(g_cycleLabel, sizeof g_cycleLabel, "Test cycle starts in %d s", int(kCycleDelay - since));
+            return;
+        }
+        const uint64_t s = since - kCycleDelay;
         cycle_set(int((s / g_cycleSeconds) % kModeCount));
         g_cycleLeft = int(g_cycleSeconds - s % g_cycleSeconds);
         // mp2-nx (deko-16): one screenshot halfway through each mode of the first loops
@@ -1145,9 +1155,10 @@ const char* cycle_label() { return g_cycleOn ? g_cycleLabel : nullptr; }
 void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
     if (!g_shotPending) return;
     g_shotPending = false;
-    const uint32_t bytes = w * h * 4;
     if (!w || !h) return;
-    if (!g_shotBuf) g_shotBuf = swdk::block_create(bytes, "screenshots");
+    const uint32_t bytes = w * h * 4;
+    // deko-16b: CPU-cached memory (deko-16's uncached reads and row-by-row SD writes froze the game)
+    if (!g_shotBuf) g_shotBuf = swdk::block_create_cached(bytes, "screenshots");
     if (!g_shotBuf || g_shotBuf.size < bytes) return;
     swdk::frame_open();
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
@@ -1159,39 +1170,44 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
     swdk::submit("a screenshot");
     dkQueueWaitIdle(R.queue);
-    mkdir(MP2NX_APP_DIR "/shots", 0777);
-    char path[160];
-    snprintf(path, sizeof path, MP2NX_APP_DIR "/shots/%s.bmp", g_shotName);
-    FILE* f = fopen(path, "wb");
-    if (!f) {
-        log("screenshot: could not write %s", path);
-        return;
-    }
-    const uint32_t row = (w * 3 + 3) & ~3u, data = row * h;
-    uint8_t hdr[54] = {'B', 'M'};
+    armDCacheFlush(g_shotBuf.cpu, bytes);  // (drops stale cache lines before the CPU reads the GPU's copy)
+    // half size (every other pixel), a 24-bit BMP, bottom row first
+    const uint32_t ow = w / 2, oh = h / 2, row = (ow * 3 + 3) & ~3u, data = row * oh;
+    auto file = std::make_shared<std::vector<uint8_t>>(54 + size_t(data), 0);
+    uint8_t* hdr = file->data();
     auto put32 = [&](int at, uint32_t x) { memcpy(hdr + at, &x, 4); };
+    hdr[0] = 'B';
+    hdr[1] = 'M';
     put32(2, 54 + data);
     put32(10, 54);
     put32(14, 40);
-    put32(18, w);
-    put32(22, h);  // bottom row first
+    put32(18, ow);
+    put32(22, oh);
     hdr[26] = 1;
     hdr[28] = 24;
     put32(34, data);
-    fwrite(hdr, 1, 54, f);
-    std::vector<uint8_t> line(row, 0);
     const uint8_t* src = g_shotBuf.cpu;
-    for (uint32_t y = h; y-- > 0;) {
-        const uint8_t* p = src + size_t(y) * w * 4;
-        for (uint32_t x = 0; x < w; x++) {
-            line[x * 3 + 0] = p[x * 4 + 2];
-            line[x * 3 + 1] = p[x * 4 + 1];
-            line[x * 3 + 2] = p[x * 4 + 0];
+    for (uint32_t oy = 0; oy < oh; oy++) {
+        const uint8_t* p = src + size_t(oh - 1 - oy) * 2 * w * 4;
+        uint8_t* d = hdr + 54 + size_t(oy) * row;
+        for (uint32_t x = 0; x < ow; x++, p += 8, d += 3) {
+            d[0] = p[2];
+            d[1] = p[1];
+            d[2] = p[0];
         }
-        fwrite(line.data(), 1, row, f);
     }
-    fclose(f);
-    log("screenshot: %s", path);
+    // the SD card write on its own thread, in one piece
+    std::string path = std::string(MP2NX_APP_DIR "/shots/") + g_shotName + ".bmp";
+    std::thread([file, path]() {
+        mkdir(MP2NX_APP_DIR "/shots", 0777);
+        if (FILE* f = fopen(path.c_str(), "wb")) {
+            fwrite(file->data(), 1, file->size(), f);
+            fclose(f);
+            log("screenshot: %s", path.c_str());
+        } else {
+            log("screenshot: could not write %s", path.c_str());
+        }
+    }).detach();
 }
 bool cycle_lod0() { return false; }  // (deko-15's "full-size textures only" mode; gone in deko-16)
 

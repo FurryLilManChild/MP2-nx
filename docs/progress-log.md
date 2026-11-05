@@ -20,6 +20,9 @@ Newest first.
   per mode; the first draw of each hidden pipeline is logged with its textures.
 - Screenshots: halfway through each mode of the first 3 loops, the swapchain image is copied to a buffer and
   written as shots/loopL_testT.bmp (MP2DK_SHOTS=0 turns it off).
+- deko-16 was untestable: each screenshot (uncached reads, row-by-row SD writes, all on the present) froze the
+  game long enough that the resume prompt could not be answered. deko-16b: CPU-cached copy, half size
+  (640x360, 0.7 MB), the SD write on its own thread, and the cycle starts 30 s after the first present.
 
 ## 2026-11-04: deko-15 (narrower test cycle, depth wipe fixed)
 
