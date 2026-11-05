@@ -345,6 +345,10 @@ void build(RPipe* p, const WGPURenderPipelineDescriptor& d) {
                                      t.blend->color.operation == WGPUBlendOperation_Add &&
                                      t.blend->alpha.operation == WGPUBlendOperation_Add;
                 if (!trivial) p->blendKinds |= kBlendAny;
+                if (!trivial && t.blend->color.dstFactor == WGPUBlendFactor_One) p->blendKinds |= kBlendAdd;
+                if (t.blend->color.srcFactor == WGPUBlendFactor_SrcAlpha &&
+                    t.blend->color.dstFactor == WGPUBlendFactor_OneMinusSrcAlpha)
+                    p->blendKinds |= kBlendAlpha;
                 for (WGPUBlendFactor f : fs) {
                     switch (f) {
                     case WGPUBlendFactor_Dst: case WGPUBlendFactor_OneMinusDst: case WGPUBlendFactor_DstAlpha:

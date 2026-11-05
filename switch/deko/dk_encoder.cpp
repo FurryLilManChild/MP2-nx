@@ -277,19 +277,21 @@ void queue_push(QueueOp& q) {
 // without a restart (the mode is read at every draw); MP2DK_MODE=<n> holds one mode instead. The mode is
 // shown on screen under the FPS counter (mp2nx_dk_cycle_label, switch_menu.cpp) and logged when it changes.
 // The Dear ImGui overlay is never skipped.
+// mp2-nx (deko-15): narrower modes than deko-14's (those found only that the door room's grey strips are a
+// blended layer); the earlier ones (old blend constant, re-sent settings, zcull, screen-reading, dual-source and
+// constant blends) changed nothing on screen and are gone
 enum CycleMode : int {
-    kModeNormal, kModeOldConst, kModeRebind, kModeZcull, kModeSkipDst, kModeSkipSrc1, kModeSkipConst, kModeSkipBlended,
+    kModeNormal, kModeLod0, kModeSkipDrawn, kModeSkipAdd, kModeSkipAlpha, kModeSkipOther, kModeSkipUnfilled,
     kModeCount
 };
 const char* const kModeNames[kModeCount] = {
     "normal",
-    "old blend constant (as deko-13)",
-    "settings re-sent before every draw",
-    "depth shortcut (zcull) reset every pass",
-    "blends that read the screen: hidden",
-    "dual-source blends: hidden",
-    "constant blends: hidden",
-    "every blended draw: hidden",
+    "full-size textures only",
+    "textures drawn during play: hidden",
+    "additive (glow) blends: hidden",
+    "see-through blends: hidden",
+    "other blends: hidden",
+    "textures with unfilled levels: hidden",
 };
 std::atomic<int> g_mode{kModeNormal};
 bool g_cycleOn = false;
@@ -298,11 +300,16 @@ int g_cycleLeft = 0;  // seconds left in this mode
 uint64_t g_modeDraws = 0, g_modeHidden = 0;
 char g_cycleLabel[128];
 
+bool g_cycleStarted = false;
 void cycle_set(int mode) {
     const int old = g_mode.exchange(mode, std::memory_order_relaxed);
-    if (old == mode) return;
-    log("test cycle: mode %d of %d, %s (the last mode drew %llu draws, hid %llu)", mode + 1, int(kModeCount),
-        kModeNames[mode], (unsigned long long)g_modeDraws, (unsigned long long)g_modeHidden);
+    if (old == mode && g_cycleStarted) return;
+    // mp2-nx (deko-15): the counts belong to the mode that ended (deko-14 printed them on the next mode's line)
+    if (g_cycleStarted)
+        log("test cycle: mode %d (%s) ended: %llu draws, %llu hidden", old + 1, kModeNames[old],
+            (unsigned long long)g_modeDraws, (unsigned long long)g_modeHidden);
+    g_cycleStarted = true;
+    log("test cycle: mode %d of %d, %s", mode + 1, int(kModeCount), kModeNames[mode]);
     g_modeDraws = g_modeHidden = 0;
 }
 
@@ -412,6 +419,7 @@ void copy_image(Replay& r, Tex* src, uint32_t srcMip, WGPUOrigin3D so, Tex* dst,
     if (w == 0 || h == 0) return;
     if (dst->depth != src->depth) dropped_copy("note: a copy between depth and colour", dst, dstMip, dO, e);
     dst->written = true;
+    if (dstMip < 32) dst->mipsWritten.fetch_or(1u << dstMip, std::memory_order_relaxed);
     if (src->compressed) {
         w = (w + src->blockW - 1) / src->blockW;
         h = (h + src->blockH - 1) / src->blockH;
@@ -441,7 +449,10 @@ void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows,
     }
     const uint32_t w = std::min(e.width, lw - o.x), h = std::min(e.height, lh - o.y);
     if (w == 0 || h == 0) return;
-    if (src != g_zero.gpu) t->written = true;
+    if (src != g_zero.gpu) {
+        t->written = true;
+        if (mip < 32) t->mipsWritten.fetch_or(1u << mip, std::memory_order_relaxed);
+    }
     transfer_begin(r);
     const DkCopyBuf buf = {src, rowBytes, rowBytes * std::max(rows, 1u)};
     const DkImageView view = level_view(t, mip);
@@ -526,6 +537,7 @@ void begin_pass(Replay& r, const PassDesc& p) {
             colors[i].mipLevelCount = 1;
             colorPtrs[i] = &colors[i];
             v->tex->written = true;
+            if (v->baseMip < 32) v->tex->mipsWritten.fetch_or(1u << v->baseMip, std::memory_order_relaxed);
             if (!r.width) {
                 r.width = level_size(v->tex->width, v->baseMip);
                 r.height = level_size(v->tex->height, v->baseMip);
@@ -541,6 +553,7 @@ void begin_pass(Replay& r, const PassDesc& p) {
         depth.mipLevelCount = 1;
         depthPtr = &depth;
         p.depth->tex->written = true;
+        if (p.depth->baseMip < 32) p.depth->tex->mipsWritten.fetch_or(1u << p.depth->baseMip, std::memory_order_relaxed);
         if (!r.width) {
             r.width = level_size(p.depth->tex->width, p.depth->baseMip);
             r.height = level_size(p.depth->tex->height, p.depth->baseMip);
@@ -560,9 +573,6 @@ void begin_pass(Replay& r, const PassDesc& p) {
     }
     if (bound > 0 && !r.width) bound = 0;
     dkCmdBufBindRenderTargets(R.cmd, colorPtrs, bound, depthPtr);
-    // mp2-nx (deko-14b test cycle): the GPU's depth summary (zcull) thrown away at every pass start
-    if (g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeZcull)
-        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
     static const DkViewportSwizzle kSwizzle = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
                                                DkSwizzle_PositiveW};
     dkCmdBufSetViewportSwizzles(R.cmd, 0, &kSwizzle, 1);
@@ -587,7 +597,7 @@ void begin_pass(Replay& r, const PassDesc& p) {
     r.vs = r.fs = nullptr;
     r.bindingsDirty = r.vbDirty = r.ibDirty = true;
     // mp2-nx (deko-14): WebGPU starts every render pass with a blend constant of 0 (deko3d keeps the last)
-    if (g_mode.load(std::memory_order_relaxed) != kModeOldConst) dkCmdBufSetBlendConst(R.cmd, 0.f, 0.f, 0.f, 0.f);
+    dkCmdBufSetBlendConst(R.cmd, 0.f, 0.f, 0.f, 0.f);
     if (r.immediates) {
         dkCmdBufBindUniformBuffer(R.cmd, DkStage_Vertex, swdk::kImmediatesUboSlot, r.immediates, 256);
         dkCmdBufBindUniformBuffer(R.cmd, DkStage_Fragment, swdk::kImmediatesUboSlot, r.immediates, 256);
@@ -652,17 +662,48 @@ void bind_stage(Replay& r, const Stage& s, DkStage stage) {
     }
 }
 
+// mp2-nx (deko-15): whether a draw's fragment stage samples a texture that matches (the views bound for it)
+template <class F> bool samples_any(const Replay& r, F&& match) {
+    if (!r.pipe->hasFs) return false;
+    for (const swdk::SlotBinding& b : r.pipe->fs.bindings) {
+        if (b.kind != swdk::SlotBinding::Kind::Sampler || b.group >= 4 || !r.groups[b.group].g) continue;
+        if (!dko::alive(r.groups[b.group].g, "a draw's bind group (test cycle)")) continue;
+        const BindGroup::Entry* e = dko::bind_group_entry(r.groups[b.group].g, b.binding);
+        View* v = e ? e->view : nullptr;
+        if (!v || v->magic != dko::kAlive || !v->tex || v->tex->magic != dko::kAlive) continue;
+        if (match(v)) return true;
+    }
+    return false;
+}
+
+bool unfilled(const View* v) {
+    if (v->tex->external || v->mipCount < 2 || v->mipCount >= 32) return false;
+    const uint32_t want = ((1u << v->mipCount) - 1u) << v->baseMip;
+    return (v->tex->mipsWritten.load(std::memory_order_relaxed) & want) != want;
+}
+
 // mp2-nx (deko-14): a draw the test cycle's mode hides (never the Dear ImGui overlay)
 bool cycle_hides(const Replay& r) {
     const int mode = g_mode.load(std::memory_order_relaxed);
-    if (mode < kModeSkipDst) return false;
+    if (mode < kModeSkipDrawn) return false;
     if (r.vb[0].b && r.vb[0].b->ui) return false;
     const uint8_t k = r.pipe->blendKinds;
     switch (mode) {
-    case kModeSkipDst: return k & kBlendDst;
-    case kModeSkipSrc1: return k & kBlendSrc1;
-    case kModeSkipConst: return k & kBlendConst;
-    case kModeSkipBlended: return k & kBlendAny;
+    case kModeSkipDrawn:
+        return samples_any(r, [](const View* v) { return (v->tex->usage & WGPUTextureUsage_RenderAttachment) != 0; });
+    case kModeSkipAdd: return k & kBlendAdd;
+    case kModeSkipAlpha: return k & kBlendAlpha;
+    case kModeSkipOther: return (k & kBlendAny) && !(k & (kBlendAdd | kBlendAlpha));
+    case kModeSkipUnfilled: {
+        static int logged = 0;
+        return samples_any(r, [](const View* v) {
+            if (!unfilled(v)) return false;
+            if (logged++ < 40)
+                log("test cycle: hid a draw sampling '%s' (%ux%u, %u mips, written 0x%X)", v->tex->label.c_str(),
+                    v->tex->width, v->tex->height, v->tex->mips, v->tex->mipsWritten.load(std::memory_order_relaxed));
+            return true;
+        });
+    }
     default: return false;
     }
 }
@@ -678,10 +719,6 @@ bool prepare_draw(Replay& r) {
         if (cycle_hides(r)) {
             g_modeHidden++;
             return false;
-        }
-        if (g_mode.load(std::memory_order_relaxed) == kModeRebind) {
-            r.boundPipe = nullptr;
-            r.bindingsDirty = r.vbDirty = true;
         }
     }
     bind_pipeline(r, r.pipe);
@@ -839,7 +876,7 @@ void replay(Replay& r, Enc* e) {
 // mp2-nx (deko-11): every level and layer of a new texture copied from zeros, a band of rows at a time
 // (Dawn's textures start as zeros; without this a texture read before it is fully written, such as an
 // empty lightmap or a target first loaded, showed whatever an earlier texture left in that memory).
-// Depth and stencil textures are left out: their passes clear them.
+// Depth textures are cleared to 0 the same way (deko-14b, queued since deko-15).
 void zero_texture(Replay& r, Tex* t) {
     static const bool kNoZero = swdk::env_flag("MP2DK_NO_ZERO", false);  // deko3d_env.txt A/B
     if (kNoZero) return;
@@ -1034,7 +1071,9 @@ void encoder_init() {
 // dk_surface.cpp: the present's commands go after everything submitted (g_submitMutex held by the caller)
 std::mutex& submit_mutex() { return g_submitMutex; }
 void texture_zero_later(Tex* t) {
-    if (!t || !t->valid || t->external || t->depth || !g_zero) return;
+    // mp2-nx (deko-15): depth textures too (deko-14b added zero_texture's depth branch, but this filter
+    // still left them out, so none were cleared: "0 depth textures cleared")
+    if (!t || !t->valid || t->external || !g_zero) return;
     QueueOp q;
     q.zero = true;
     q.tex = t;
@@ -1080,6 +1119,7 @@ void cycle_tick() {
 }
 
 const char* cycle_label() { return g_cycleOn ? g_cycleLabel : nullptr; }
+bool cycle_lod0() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeLod0; }
 
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "

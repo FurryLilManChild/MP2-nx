@@ -275,6 +275,7 @@ Tex* make_external_texture(WGPUTexture handle, const WGPUTextureDescriptor& d, c
     t->valid = true;
     t->external = true;
     t->written = true;
+    t->mipsWritten = ~0u;
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_textures[handle] = t;
     g_stats.textures++;
@@ -432,7 +433,33 @@ DkResHandle texture_handle(View* v, Samp* s) {
                        v->tex->label.c_str(), v->tex->width, v->tex->height, v->tex->layers, v->tex->mips,
                        unsigned(v->tex->wformat));
     }
-    const uint32_t sampler = s ? swdk::sampler_slot(s->sampler, s->key) : uint32_t(swdk::kSamplerNearestClamp);
+    // mp2-nx (deko-15 diagnostics): a texture sampled with mip levels nothing has written yet (a smaller copy
+    // left as zeros, or never uploaded)
+    if (image != swdk::kEmptyImage && v && v->tex && !v->tex->external && v->mipCount > 1 &&
+        v->mipCount < 32 && !v->tex->warnedMips.load(std::memory_order_relaxed)) {
+        const uint32_t want = ((1u << v->mipCount) - 1u) << v->baseMip;
+        const uint32_t have = v->tex->mipsWritten.load(std::memory_order_relaxed);
+        if ((have & want) != want && !v->tex->warnedMips.exchange(true)) {
+            static int logged = 0;
+            if (logged++ < 60)
+                mp2dk::log("diag: '%s' (%ux%u, %u mips, format 0x%X) is sampled with levels never written "
+                           "(written 0x%X of 0x%X)",
+                           v->tex->label.c_str(), v->tex->width, v->tex->height, v->tex->mips,
+                           unsigned(v->tex->wformat), have & want, want);
+        }
+    }
+    uint32_t sampler = uint32_t(swdk::kSamplerNearestClamp);
+    if (s) {
+        if (mp2dk::cycle_lod0()) {
+            // mp2-nx (deko-15 test cycle): only the full-size level (mip 0) is ever read
+            DkSampler k = s->sampler;
+            k.lodClampMin = 0.f;
+            k.lodClampMax = 0.f;
+            sampler = swdk::sampler_slot(k, s->key ^ 0x9E3779B97F4A7C15ull);
+        } else {
+            sampler = swdk::sampler_slot(s->sampler, s->key);
+        }
+    }
     return dkMakeTextureHandle(image, sampler);
 }
 

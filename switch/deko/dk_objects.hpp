@@ -34,6 +34,8 @@ struct Buf;  // dk_bridge.hpp
 // mp2-nx (deko-11, dk_encoder.cpp): a new texture's memory is zeroed by the next submit, ahead of its
 // writes (Dawn's textures start as zeros; the image heap hands back memory other textures used)
 void texture_zero_later(aurora::gfx::dk::Tex* t);
+// mp2-nx (deko-15, dk_encoder.cpp): the test cycle's "full-size textures only" mode is on
+bool cycle_lod0();
 }
 
 namespace aurora::gfx::dk {
@@ -58,6 +60,10 @@ struct Tex {
     // sampled before that is logged once (dk_objects.cpp texture_handle)
     std::atomic<bool> written{false};
     std::atomic<bool> warnedUnwritten{false};
+    // mp2-nx (deko-15 diagnostics): one bit per mip level written by an upload, copy or pass; a texture
+    // sampled with levels never written is logged once (texture_handle)
+    std::atomic<uint32_t> mipsWritten{0};
+    std::atomic<bool> warnedMips{false};
     uint8_t blockW = 1, blockH = 1, blockBytes = 4;
     DkImage image{};
     swdk::ImageAlloc mem;

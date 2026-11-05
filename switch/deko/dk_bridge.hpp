@@ -84,6 +84,9 @@ struct RPipe {
 };
 // mp2-nx (deko-14): RPipe::blendKinds bits
 constexpr uint8_t kBlendAny = 1, kBlendDst = 2, kBlendSrc1 = 4, kBlendConst = 8;
+// mp2-nx (deko-15): additive (the colour's destination factor is One) and plain see-through
+// (SrcAlpha, OneMinusSrcAlpha)
+constexpr uint8_t kBlendAdd = 16, kBlendAlpha = 32;
 RPipe* find_render_pipeline(WGPURenderPipeline p);
 void pipeline_retain(RPipe* p);
 void pipeline_release(RPipe* p);

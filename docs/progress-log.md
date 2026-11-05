@@ -2,6 +2,21 @@
 
 Newest first.
 
+## 2026-11-04: deko-15 (narrower test cycle, depth wipe fixed)
+
+- The owner's Vulkan photo of the door room: the strips are ribbed metal grates with lighter brushed panels. On
+  deko3d they are one flat grey, which looks like a texture's smallest mip level (its average colour) or a
+  texture drawn during play that is not ready.
+- texture_zero_later no longer skips depth textures, so zero_texture's depth branch (deko-14b) runs.
+- Cycle log fixed: "mode N (...) ended: X draws, Y hidden" is printed for the mode that ended.
+- New modes (MP2DK_CYCLE=10, 7 modes): normal; full-size textures only (every sampler clamped to LOD 0,
+  a second sampler descriptor keyed apart); textures drawn during play hidden (a fragment texture with
+  RenderAttachment usage); additive blends hidden (colour dst factor One); see-through blends hidden
+  (SrcAlpha, OneMinusSrcAlpha); other blends hidden; textures with unfilled levels hidden.
+- Tex::mipsWritten (one bit per level, set by uploads, copies and passes). A texture sampled with levels never
+  written is logged once ("diag: ... is sampled with levels never written"), and the unfilled mode logs the
+  textures it hides.
+
 ## 2026-11-04: deko-14b result (paused here)
 
 - One boot, 8-mode cycle. The log shows "0 depth textures cleared": texture_zero_later (dk_encoder.cpp) still
