@@ -278,12 +278,14 @@ void queue_push(QueueOp& q) {
 // shown on screen under the FPS counter (mp2nx_dk_cycle_label, switch_menu.cpp) and logged when it changes.
 // The Dear ImGui overlay is never skipped.
 enum CycleMode : int {
-    kModeNormal, kModeOldConst, kModeRebind, kModeSkipDst, kModeSkipSrc1, kModeSkipConst, kModeSkipBlended, kModeCount
+    kModeNormal, kModeOldConst, kModeRebind, kModeZcull, kModeSkipDst, kModeSkipSrc1, kModeSkipConst, kModeSkipBlended,
+    kModeCount
 };
 const char* const kModeNames[kModeCount] = {
     "normal",
     "old blend constant (as deko-13)",
     "settings re-sent before every draw",
+    "depth shortcut (zcull) reset every pass",
     "blends that read the screen: hidden",
     "dual-source blends: hidden",
     "constant blends: hidden",
@@ -337,6 +339,7 @@ struct Replay {
 
 struct Totals {
     uint64_t submits = 0, draws = 0, skipped = 0, passes = 0, copies = 0, uploads = 0, uploadBytes = 0, computes = 0;
+    uint64_t depthZeroed = 0;  // mp2-nx (deko-14b)
 } g_totals;
 
 void mark(Buf* b, Replay& r) {
@@ -557,6 +560,9 @@ void begin_pass(Replay& r, const PassDesc& p) {
     }
     if (bound > 0 && !r.width) bound = 0;
     dkCmdBufBindRenderTargets(R.cmd, colorPtrs, bound, depthPtr);
+    // mp2-nx (deko-14b test cycle): the GPU's depth summary (zcull) thrown away at every pass start
+    if (g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeZcull)
+        dkCmdBufBarrier(R.cmd, DkBarrier_None, DkInvalidateFlags_Zcull);
     static const DkViewportSwizzle kSwizzle = {DkSwizzle_PositiveX, DkSwizzle_PositiveY, DkSwizzle_PositiveZ,
                                                DkSwizzle_PositiveW};
     dkCmdBufSetViewportSwizzles(R.cmd, 0, &kSwizzle, 1);
@@ -837,7 +843,39 @@ void replay(Replay& r, Enc* e) {
 void zero_texture(Replay& r, Tex* t) {
     static const bool kNoZero = swdk::env_flag("MP2DK_NO_ZERO", false);  // deko3d_env.txt A/B
     if (kNoZero) return;
-    if (!g_zero || !t || !t->valid || t->external || t->depth) return;
+    if (!g_zero || !t || !t->valid || t->external) return;
+    if (t->depth) {
+        // mp2-nx (deko-14b): depth textures too (Dawn's start at 0; reused memory held another target's
+        // depth): each level and layer is bound alone and cleared to depth 0, stencil 0
+        static const bool kNoDepthZero = swdk::env_flag("MP2DK_NO_DEPTH_ZERO", false);
+        if (kNoDepthZero) return;
+        work_begin(r);
+        DkDepthStencilState ds;
+        dkDepthStencilStateDefaults(&ds);
+        ds.depthTestEnable = true;
+        ds.depthWriteEnable = true;
+        ds.depthCompareOp = DkCompareOp_Always;
+        dkCmdBufBindDepthStencilState(R.cmd, &ds);
+        for (uint32_t m = 0; m < t->mips; m++) {
+            const uint32_t lw = level_size(t->width, m), lh = level_size(t->height, m);
+            for (uint32_t z = 0; z < t->layers; z++) {
+                DkImageView v;
+                dkImageViewDefaults(&v, &t->image);
+                v.mipLevelOffset = m;
+                v.mipLevelCount = 1;
+                v.layerOffset = uint16_t(z);
+                v.layerCount = 1;
+                dkCmdBufBindRenderTargets(R.cmd, nullptr, 0, &v);
+                const DkViewport vp = {0.f, 0.f, float(lw), float(lh), 0.f, 1.f};
+                const DkScissor sc = {0, 0, lw, lh};
+                dkCmdBufSetViewports(R.cmd, 0, &vp, 1);
+                dkCmdBufSetScissors(R.cmd, 0, &sc, 1);
+                dkCmdBufClearDepthStencil(R.cmd, true, 0.0f, 0xFF, 0);
+            }
+        }
+        g_totals.depthZeroed++;
+        return;
+    }
     for (uint32_t m = 0; m < t->mips; m++) {
         const uint32_t lw = level_size(t->width, m), lh = level_size(t->height, m);
         const uint32_t blocksW = (lw + t->blockW - 1) / t->blockW, blocksH = (lh + t->blockH - 1) / t->blockH;
@@ -1049,6 +1087,7 @@ void encoder_report() {
         (unsigned long long)g_totals.submits, (unsigned long long)g_totals.draws, (unsigned long long)g_totals.skipped,
         (unsigned long long)g_totals.passes, (unsigned long long)g_totals.copies, (unsigned long long)g_totals.uploads,
         (unsigned long long)g_totals.computes);
+    log("encoder: %llu depth textures cleared to 0 at creation", (unsigned long long)g_totals.depthZeroed);
 }
 
 }  // namespace mp2dk

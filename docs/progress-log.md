@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-11-04: deko-14b
+
+- Anti-aliasing ruled out: the owner's setting was already off (the "asks for 4 samples" log line is a clear
+  pipeline built either way; misread). Re-running deko-13 in the same places gave different good and bad spots
+  with no settings changed: the fault depends on leftover memory or timing, not a fixed translation error.
+- Found: the game's fog volumes (CCubeRenderer::ReallyRenderFogVolume) copy depth into textures and blend with
+  destination alpha; the hazy hallway on Vulkan is one. The white patches match its colour.
+- deko-14b: depth textures are now cleared to 0 at creation like other textures (they were skipped since
+  deko-11; image heap memory is reused). New cycle mode: the GPU's zcull state invalidated at every pass start.
+  8 modes, one boot.
+
 ## 2026-11-04: deko-13 result, deko-14 (test cycle)
 
 - deko-13: two runs, no crash, about 60 fps. Process memory about 1,700 MiB against about 1,950 MiB on deko-11
