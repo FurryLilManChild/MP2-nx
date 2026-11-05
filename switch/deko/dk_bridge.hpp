@@ -81,6 +81,7 @@ struct RPipe {
     std::string label;
     // mp2-nx (deko-14 test cycle): what its blending reads (kBlend* in dk_encoder.cpp's cycle)
     uint8_t blendKinds = 0;
+    uint32_t id = 0;  // mp2-nx (deko-16): the order it was built in (the test cycle's groups)
 };
 // mp2-nx (deko-14): RPipe::blendKinds bits
 constexpr uint8_t kBlendAny = 1, kBlendDst = 2, kBlendSrc1 = 4, kBlendConst = 8;

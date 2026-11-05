@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 2026-11-04: deko-15 result, deko-16 (buffers zeroed, see-through groups, screenshots)
+
+- deko-15 in Temple Grounds and the door room. Test 5 (see-through blends hidden, SrcAlpha/OneMinusSrcAlpha)
+  removed both the white ground patches and the grey door-room strips, uncovering the correct texture underneath
+  (the brushed panels from the Vulkan photo). So the bad pixels are a see-through layer drawn over good surfaces.
+- Ruled out: smallest mip (test 2, LOD clamped to 0, no change); unfilled mip levels (test 7 hid 0 draws, no
+  "levels never written" diag); leftover depth (now 4 to 5 depth textures cleared, patches unchanged).
+- Test 3 (textures with RenderAttachment usage hidden) blanked the screen: Aurora draws the frame into
+  'Render texture' and the final blit samples it. A bad test, dropped.
+- Quit crash (crash.txt, replay: begin render pass): pc in prepare_draw's vertex buffer loop, far
+  0x3200000000006c, after Aurora's "Device lost: Device was destroyed". Shutdown only; not fixed yet.
+- New suspect for the boot-to-boot changes: deko3d memory blocks for WebGPU buffers came from recycled heap
+  memory and were never zeroed (WebGPU buffers start as zeros). deko-16 zeroes them at creation
+  (MP2DK_NO_BUFFER_ZERO=1 turns it off).
+- deko-16 cycle: normal, then the see-through pipelines in 6 groups by build order (RPipe::id % 6), one hidden
+  per mode; the first draw of each hidden pipeline is logged with its textures.
+- Screenshots: halfway through each mode of the first 3 loops, the swapchain image is copied to a buffer and
+  written as shots/loopL_testT.bmp (MP2DK_SHOTS=0 turns it off).
+
 ## 2026-11-04: deko-15 (narrower test cycle, depth wipe fixed)
 
 - The owner's Vulkan photo of the door room: the strips are ribbed metal grates with lighter brushed panels. On

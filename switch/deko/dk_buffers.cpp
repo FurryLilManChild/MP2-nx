@@ -148,6 +148,13 @@ WGPUBuffer __wrap_wgpuDeviceCreateBuffer(WGPUDevice device, WGPUBufferDescriptor
     buf->mem = buf->cached ? swdk::block_create_cached(uint32_t(std::max<uint64_t>(d->size, 4)), what)
                            : swdk::block_create(uint32_t(std::max<uint64_t>(d->size, 4)), what);
     if (!buf->mem) log("buffers: no deko3d memory for %s", what);
+    // mp2-nx (deko-16): WebGPU buffers start as zeros; deko3d memory blocks come from recycled heap memory
+    // and start with whatever was there (different every boot). deko3d_env.txt MP2DK_NO_BUFFER_ZERO=1: off.
+    static const bool kNoBufferZero = swdk::env_flag("MP2DK_NO_BUFFER_ZERO", false);
+    if (buf->mem && !kNoBufferZero) {
+        memset(buf->mem.cpu, 0, buf->mem.size);
+        if (buf->cached) armDCacheFlush(buf->mem.cpu, buf->mem.size);
+    }
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_buffers[b] = buf;
     g_bytes += buf->mem.size;

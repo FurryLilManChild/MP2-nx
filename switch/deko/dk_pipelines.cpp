@@ -368,6 +368,10 @@ void build(RPipe* p, const WGPURenderPipelineDescriptor& d) {
     for (uint32_t i = p->colorCount; i < 8; i++) dkColorWriteStateSetMask(&p->colorWrite, i, 0);
     // mp2-nx (deko-14): the blending census (pipelines_report)
     g_blendCensus[0].fetch_add(1, std::memory_order_relaxed);
+    {
+        static std::atomic<uint32_t> nextId{0};
+        p->id = nextId.fetch_add(1, std::memory_order_relaxed);
+    }
     if (p->blendKinds & kBlendAny) g_blendCensus[1].fetch_add(1, std::memory_order_relaxed);
     if (p->blendKinds & kBlendDst) g_blendCensus[2].fetch_add(1, std::memory_order_relaxed);
     if (p->blendKinds & kBlendSrc1) g_blendCensus[3].fetch_add(1, std::memory_order_relaxed);

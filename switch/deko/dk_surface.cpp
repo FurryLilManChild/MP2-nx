@@ -45,6 +45,7 @@ namespace mp2dk {
 void encoder_init();
 void encoder_report();
 void cycle_tick();
+void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h);
 void pipelines_report();
 std::mutex& submit_mutex();
 void flush_locked(const char* why);
@@ -90,6 +91,7 @@ void write_boot_count(int n) {
 }
 
 uint64_t g_reportAt = 0;
+int g_slot = -1;  // mp2-nx (deko-16): this frame's swapchain image (the test cycle's screenshots)
 
 }  // namespace
 
@@ -256,6 +258,7 @@ void __wrap_wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture* out)
         return;
     }
     const int slot = swdk::swapchain_acquire();
+    g_slot = slot;
     out->texture = g_surface.textures[slot % g_surface.count];
     __wrap_wgpuTextureAddRef(out->texture);  // (the caller's reference)
     out->status = WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal;
@@ -266,6 +269,7 @@ WGPUStatus __wrap_wgpuSurfacePresent(WGPUSurface s) {
     {
         std::lock_guard<std::mutex> lock(submit_mutex());
         flush_locked("the present");
+        if (g_slot >= 0) shot_take_locked(swdk::swapchain_image(g_slot), g_surface.width, g_surface.height);
         swdk::swapchain_present();
     }
     presented();

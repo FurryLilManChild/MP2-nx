@@ -17,9 +17,15 @@
 // (docs/deko3d-phase1-design.md).
 #include "dk_bridge.hpp"
 
+#include "../include/mp2nx_app.h"
+
+#include <sys/stat.h>
+
 #include <switch.h>
 
 #include <algorithm>
+#include <cstdio>
+#include <vector>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -277,21 +283,23 @@ void queue_push(QueueOp& q) {
 // without a restart (the mode is read at every draw); MP2DK_MODE=<n> holds one mode instead. The mode is
 // shown on screen under the FPS counter (mp2nx_dk_cycle_label, switch_menu.cpp) and logged when it changes.
 // The Dear ImGui overlay is never skipped.
-// mp2-nx (deko-15): narrower modes than deko-14's (those found only that the door room's grey strips are a
-// blended layer); the earlier ones (old blend constant, re-sent settings, zcull, screen-reading, dual-source and
-// constant blends) changed nothing on screen and are gone
+// mp2-nx (deko-16): deko-15 found the white patches and grey strips are see-through blends
+// (SrcAlpha, OneMinusSrcAlpha) drawn over correct surfaces; full-size textures, unfilled levels and the other
+// blend kinds changed nothing. The see-through pipelines are split into 6 groups by build order (RPipe::id % 6),
+// one group hidden per mode.
 enum CycleMode : int {
-    kModeNormal, kModeLod0, kModeSkipDrawn, kModeSkipAdd, kModeSkipAlpha, kModeSkipOther, kModeSkipUnfilled,
+    kModeNormal, kModeGroup0, kModeGroup1, kModeGroup2, kModeGroup3, kModeGroup4, kModeGroup5,
     kModeCount
 };
+constexpr uint32_t kGroups = 6;
 const char* const kModeNames[kModeCount] = {
     "normal",
-    "full-size textures only",
-    "textures drawn during play: hidden",
-    "additive (glow) blends: hidden",
-    "see-through blends: hidden",
-    "other blends: hidden",
-    "textures with unfilled levels: hidden",
+    "see-through group 1 of 6: hidden",
+    "see-through group 2 of 6: hidden",
+    "see-through group 3 of 6: hidden",
+    "see-through group 4 of 6: hidden",
+    "see-through group 5 of 6: hidden",
+    "see-through group 6 of 6: hidden",
 };
 std::atomic<int> g_mode{kModeNormal};
 bool g_cycleOn = false;
@@ -299,6 +307,11 @@ uint64_t g_cycleSeconds = 0, g_cycleStart = 0;
 int g_cycleLeft = 0;  // seconds left in this mode
 uint64_t g_modeDraws = 0, g_modeHidden = 0;
 char g_cycleLabel[128];
+// mp2-nx (deko-16): the test cycle's screenshots (shot_take_locked)
+bool g_shotPending = false;
+char g_shotName[96];
+swdk::Block g_shotBuf;
+constexpr uint64_t kShotLoops = 3;
 
 bool g_cycleStarted = false;
 void cycle_set(int mode) {
@@ -676,36 +689,30 @@ template <class F> bool samples_any(const Replay& r, F&& match) {
     return false;
 }
 
-bool unfilled(const View* v) {
-    if (v->tex->external || v->mipCount < 2 || v->mipCount >= 32) return false;
-    const uint32_t want = ((1u << v->mipCount) - 1u) << v->baseMip;
-    return (v->tex->mipsWritten.load(std::memory_order_relaxed) & want) != want;
-}
-
-// mp2-nx (deko-14): a draw the test cycle's mode hides (never the Dear ImGui overlay)
+// mp2-nx (deko-16): a draw the test cycle's mode hides (never the Dear ImGui overlay); the first draws of each
+// pipeline hidden are logged with the textures they sample (what the group draws)
+std::vector<uint32_t> g_loggedPipes;
 bool cycle_hides(const Replay& r) {
     const int mode = g_mode.load(std::memory_order_relaxed);
-    if (mode < kModeSkipDrawn) return false;
+    if (mode < kModeGroup0) return false;
     if (r.vb[0].b && r.vb[0].b->ui) return false;
-    const uint8_t k = r.pipe->blendKinds;
-    switch (mode) {
-    case kModeSkipDrawn:
-        return samples_any(r, [](const View* v) { return (v->tex->usage & WGPUTextureUsage_RenderAttachment) != 0; });
-    case kModeSkipAdd: return k & kBlendAdd;
-    case kModeSkipAlpha: return k & kBlendAlpha;
-    case kModeSkipOther: return (k & kBlendAny) && !(k & (kBlendAdd | kBlendAlpha));
-    case kModeSkipUnfilled: {
-        static int logged = 0;
-        return samples_any(r, [](const View* v) {
-            if (!unfilled(v)) return false;
-            if (logged++ < 40)
-                log("test cycle: hid a draw sampling '%s' (%ux%u, %u mips, written 0x%X)", v->tex->label.c_str(),
-                    v->tex->width, v->tex->height, v->tex->mips, v->tex->mipsWritten.load(std::memory_order_relaxed));
-            return true;
+    if (!(r.pipe->blendKinds & kBlendAlpha)) return false;
+    if (r.pipe->id % kGroups != uint32_t(mode - kModeGroup0)) return false;
+    if (g_loggedPipes.size() < 400 &&
+        std::find(g_loggedPipes.begin(), g_loggedPipes.end(), r.pipe->id) == g_loggedPipes.end()) {
+        g_loggedPipes.push_back(r.pipe->id);
+        char tex[256] = "";
+        size_t n = 0;
+        samples_any(r, [&](const View* v) {
+            if (n < sizeof tex - 1)
+                n += snprintf(tex + n, sizeof tex - n, " '%s' %ux%u", v->tex->label.c_str(), v->tex->width,
+                              v->tex->height);
+            return false;
         });
+        log("test cycle: group %d hides pipeline %u '%s', textures:%s", mode - kModeGroup0 + 1, r.pipe->id,
+            r.pipe->label.c_str(), n ? tex : " none");
     }
-    default: return false;
-    }
+    return true;
 }
 
 bool prepare_draw(Replay& r) {
@@ -1109,6 +1116,16 @@ void cycle_tick() {
         const uint64_t s = armTicksToNs(armGetSystemTick() - g_cycleStart) / 1'000'000'000ull;
         cycle_set(int((s / g_cycleSeconds) % kModeCount));
         g_cycleLeft = int(g_cycleSeconds - s % g_cycleSeconds);
+        // mp2-nx (deko-16): one screenshot halfway through each mode of the first loops
+        static const bool kShots = swdk::env_flag("MP2DK_SHOTS", true);
+        static uint64_t shotSlot = ~0ull;
+        const uint64_t slot = s / g_cycleSeconds, loop = slot / kModeCount + 1;
+        if (kShots && loop <= kShotLoops && slot != shotSlot && s % g_cycleSeconds >= g_cycleSeconds / 2) {
+            shotSlot = slot;
+            g_shotPending = true;
+            snprintf(g_shotName, sizeof g_shotName, "loop%llu_test%d", (unsigned long long)loop,
+                     int(slot % kModeCount) + 1);
+        }
     }
     const int m = g_mode.load(std::memory_order_relaxed);
     if (g_cycleSeconds)
@@ -1119,7 +1136,64 @@ void cycle_tick() {
 }
 
 const char* cycle_label() { return g_cycleOn ? g_cycleLabel : nullptr; }
-bool cycle_lod0() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeLod0; }
+
+// ---- mp2-nx (deko-16): the test cycle's screenshots
+// Halfway through each mode of the first kShotLoops loops, the next present's picture is copied to memory and
+// written to <app folder>/shots/loopL_testT.bmp (24-bit, about 2.7 MB), test label and all.
+// deko3d_env.txt MP2DK_SHOTS=0: none.
+
+void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
+    if (!g_shotPending) return;
+    g_shotPending = false;
+    const uint32_t bytes = w * h * 4;
+    if (!w || !h) return;
+    if (!g_shotBuf) g_shotBuf = swdk::block_create(bytes, "screenshots");
+    if (!g_shotBuf || g_shotBuf.size < bytes) return;
+    swdk::frame_open();
+    dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    DkImageView v;
+    dkImageViewDefaults(&v, &image);
+    const DkImageRect rect = {0, 0, 0, w, h, 1};
+    const DkCopyBuf buf = {g_shotBuf.gpu, w * 4, w * 4 * h};
+    dkCmdBufCopyImageToBuffer(R.cmd, &v, &rect, &buf, 0);
+    dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    swdk::submit("a screenshot");
+    dkQueueWaitIdle(R.queue);
+    mkdir(MP2NX_APP_DIR "/shots", 0777);
+    char path[160];
+    snprintf(path, sizeof path, MP2NX_APP_DIR "/shots/%s.bmp", g_shotName);
+    FILE* f = fopen(path, "wb");
+    if (!f) {
+        log("screenshot: could not write %s", path);
+        return;
+    }
+    const uint32_t row = (w * 3 + 3) & ~3u, data = row * h;
+    uint8_t hdr[54] = {'B', 'M'};
+    auto put32 = [&](int at, uint32_t x) { memcpy(hdr + at, &x, 4); };
+    put32(2, 54 + data);
+    put32(10, 54);
+    put32(14, 40);
+    put32(18, w);
+    put32(22, h);  // bottom row first
+    hdr[26] = 1;
+    hdr[28] = 24;
+    put32(34, data);
+    fwrite(hdr, 1, 54, f);
+    std::vector<uint8_t> line(row, 0);
+    const uint8_t* src = g_shotBuf.cpu;
+    for (uint32_t y = h; y-- > 0;) {
+        const uint8_t* p = src + size_t(y) * w * 4;
+        for (uint32_t x = 0; x < w; x++) {
+            line[x * 3 + 0] = p[x * 4 + 2];
+            line[x * 3 + 1] = p[x * 4 + 1];
+            line[x * 3 + 2] = p[x * 4 + 0];
+        }
+        fwrite(line.data(), 1, row, f);
+    }
+    fclose(f);
+    log("screenshot: %s", path);
+}
+bool cycle_lod0() { return false; }  // (deko-15's "full-size textures only" mode; gone in deko-16)
 
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "
