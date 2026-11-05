@@ -44,6 +44,7 @@ void objects_frame_start_hook() { aurora::gfx::dk::objects_frame_start(); }
 namespace mp2dk {
 void encoder_init();
 void encoder_report();
+void cycle_tick();
 void pipelines_report();
 std::mutex& submit_mutex();
 void flush_locked(const char* why);
@@ -268,6 +269,7 @@ WGPUStatus __wrap_wgpuSurfacePresent(WGPUSurface s) {
         swdk::swapchain_present();
     }
     presented();
+    cycle_tick();
     maps_poll();
     const uint64_t now = armGetSystemTick();
     if (g_reportAt == 0) g_reportAt = now;

@@ -43,6 +43,7 @@ struct Buf {
     bool cached = false;              // CPU-cached (map-read buffers): invalidated before the CPU reads
     bool unmapDawn = false;           // created mapped: Dawn's own mapping ends at the first Unmap
     std::atomic<uint64_t> lastUse{0};  // the serial of the last submit that read or wrote it
+    bool ui = false;                   // mp2-nx (deko-14): a Dear ImGui buffer (the overlay is never skipped)
 };
 Buf* find_buffer(WGPUBuffer b);
 void buffer_retain(Buf* b);
@@ -78,7 +79,11 @@ struct RPipe {
     DkVtxBufferState vbufs[8] = {};
     uint32_t vbufCount = 0;
     std::string label;
+    // mp2-nx (deko-14 test cycle): what its blending reads (kBlend* in dk_encoder.cpp's cycle)
+    uint8_t blendKinds = 0;
 };
+// mp2-nx (deko-14): RPipe::blendKinds bits
+constexpr uint8_t kBlendAny = 1, kBlendDst = 2, kBlendSrc1 = 4, kBlendConst = 8;
 RPipe* find_render_pipeline(WGPURenderPipeline p);
 void pipeline_retain(RPipe* p);
 void pipeline_release(RPipe* p);

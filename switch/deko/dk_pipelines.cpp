@@ -166,6 +166,9 @@ DkCompareOp compare_op(WGPUCompareFunction f) {
     }
 }
 
+// mp2-nx (deko-14): pipelines built, blended, reading the destination, dual-source, constant
+std::atomic<uint32_t> g_blendCensus[5];
+
 DkBlendFactor blend_factor(WGPUBlendFactor f, bool alpha) {
     switch (f) {
     case WGPUBlendFactor_Zero: return DkBlendFactor_Zero;
@@ -332,10 +335,39 @@ void build(RPipe* p, const WGPURenderPipelineDescriptor& d) {
                                        blend_factor(t.blend->color.dstFactor, false),
                                        blend_factor(t.blend->alpha.srcFactor, true),
                                        blend_factor(t.blend->alpha.dstFactor, true));
+                // mp2-nx (deko-14 test cycle): what this blending reads
+                const WGPUBlendFactor fs[4] = {t.blend->color.srcFactor, t.blend->color.dstFactor,
+                                               t.blend->alpha.srcFactor, t.blend->alpha.dstFactor};
+                const bool trivial = t.blend->color.srcFactor == WGPUBlendFactor_One &&
+                                     t.blend->color.dstFactor == WGPUBlendFactor_Zero &&
+                                     t.blend->alpha.srcFactor == WGPUBlendFactor_One &&
+                                     t.blend->alpha.dstFactor == WGPUBlendFactor_Zero &&
+                                     t.blend->color.operation == WGPUBlendOperation_Add &&
+                                     t.blend->alpha.operation == WGPUBlendOperation_Add;
+                if (!trivial) p->blendKinds |= kBlendAny;
+                for (WGPUBlendFactor f : fs) {
+                    switch (f) {
+                    case WGPUBlendFactor_Dst: case WGPUBlendFactor_OneMinusDst: case WGPUBlendFactor_DstAlpha:
+                    case WGPUBlendFactor_OneMinusDstAlpha: case WGPUBlendFactor_SrcAlphaSaturated:
+                        p->blendKinds |= kBlendDst; break;
+                    case WGPUBlendFactor_Src1: case WGPUBlendFactor_OneMinusSrc1: case WGPUBlendFactor_Src1Alpha:
+                    case WGPUBlendFactor_OneMinusSrc1Alpha:
+                        p->blendKinds |= kBlendSrc1; break;
+                    case WGPUBlendFactor_Constant: case WGPUBlendFactor_OneMinusConstant:
+                        p->blendKinds |= kBlendConst; break;
+                    default: break;
+                    }
+                }
             }
         }
     }
     for (uint32_t i = p->colorCount; i < 8; i++) dkColorWriteStateSetMask(&p->colorWrite, i, 0);
+    // mp2-nx (deko-14): the blending census (pipelines_report)
+    g_blendCensus[0].fetch_add(1, std::memory_order_relaxed);
+    if (p->blendKinds & kBlendAny) g_blendCensus[1].fetch_add(1, std::memory_order_relaxed);
+    if (p->blendKinds & kBlendDst) g_blendCensus[2].fetch_add(1, std::memory_order_relaxed);
+    if (p->blendKinds & kBlendSrc1) g_blendCensus[3].fetch_add(1, std::memory_order_relaxed);
+    if (p->blendKinds & kBlendConst) g_blendCensus[4].fetch_add(1, std::memory_order_relaxed);
 
     // vertex buffers: attribute i is shader location i; unused locations read a fixed zero
     p->vbufCount = uint32_t(std::min<size_t>(d.vertex.bufferCount, 8));
@@ -409,6 +441,9 @@ void pipelines_report() {
         "uam wait %.1f s)",
         (unsigned long long)g_stats.pipelines, (unsigned long long)g_stats.invalid, (unsigned long long)g_stats.stageHits,
         (unsigned long long)g_stats.stageMisses, double(g_stats.translateNs) / 1e9, double(g_stats.waitNs) / 1e9);
+    log("pipelines: blending census: %u built, %u blended, %u read the destination, %u dual-source, %u constant",
+        g_blendCensus[0].load(), g_blendCensus[1].load(), g_blendCensus[2].load(), g_blendCensus[3].load(),
+        g_blendCensus[4].load());
 }
 
 }  // namespace mp2dk

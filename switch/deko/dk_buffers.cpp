@@ -19,6 +19,7 @@
 #include <deque>
 #include <mutex>
 #include <shared_mutex>
+#include <string_view>
 #include <unordered_map>
 
 extern "C" {
@@ -138,6 +139,9 @@ WGPUBuffer __wrap_wgpuDeviceCreateBuffer(WGPUDevice device, WGPUBufferDescriptor
     buf->usage = d->usage;
     buf->cached = (d->usage & WGPUBufferUsage_MapRead) != 0;
     buf->unmapDawn = d->mappedAtCreation;
+    buf->ui = d->label.data && std::string_view(d->label.data, d->label.length == WGPU_STRLEN ? strlen(d->label.data)
+                                                                                                : d->label.length)
+                                       .find("ImGui") != std::string_view::npos;
     char what[96];
     snprintf(what, sizeof what, "buffer %.*s (%llu bytes)", int(d->label.data ? std::min<size_t>(d->label.length, 48) : 0),
              d->label.data ? d->label.data : "", (unsigned long long)d->size);

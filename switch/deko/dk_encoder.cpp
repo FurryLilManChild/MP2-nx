@@ -272,6 +272,38 @@ void queue_push(QueueOp& q) {
     g_queueOps.push_back(q);
 }
 
+// ---- mp2-nx (deko-14): the test cycle
+// deko3d_env.txt MP2DK_CYCLE=<seconds> steps through the modes below, one every <seconds>, round and round,
+// without a restart (the mode is read at every draw); MP2DK_MODE=<n> holds one mode instead. The mode is
+// shown on screen under the FPS counter (mp2nx_dk_cycle_label, switch_menu.cpp) and logged when it changes.
+// The Dear ImGui overlay is never skipped.
+enum CycleMode : int {
+    kModeNormal, kModeOldConst, kModeRebind, kModeSkipDst, kModeSkipSrc1, kModeSkipConst, kModeSkipBlended, kModeCount
+};
+const char* const kModeNames[kModeCount] = {
+    "normal",
+    "old blend constant (as deko-13)",
+    "settings re-sent before every draw",
+    "blends that read the screen: hidden",
+    "dual-source blends: hidden",
+    "constant blends: hidden",
+    "every blended draw: hidden",
+};
+std::atomic<int> g_mode{kModeNormal};
+bool g_cycleOn = false;
+uint64_t g_cycleSeconds = 0, g_cycleStart = 0;
+int g_cycleLeft = 0;  // seconds left in this mode
+uint64_t g_modeDraws = 0, g_modeHidden = 0;
+char g_cycleLabel[128];
+
+void cycle_set(int mode) {
+    const int old = g_mode.exchange(mode, std::memory_order_relaxed);
+    if (old == mode) return;
+    log("test cycle: mode %d of %d, %s (the last mode drew %llu draws, hid %llu)", mode + 1, int(kModeCount),
+        kModeNames[mode], (unsigned long long)g_modeDraws, (unsigned long long)g_modeHidden);
+    g_modeDraws = g_modeHidden = 0;
+}
+
 // ---- replay
 struct BoundGroup {
     BindGroup* g = nullptr;
@@ -548,6 +580,8 @@ void begin_pass(Replay& r, const PassDesc& p) {
     r.boundPipe = nullptr;
     r.vs = r.fs = nullptr;
     r.bindingsDirty = r.vbDirty = r.ibDirty = true;
+    // mp2-nx (deko-14): WebGPU starts every render pass with a blend constant of 0 (deko3d keeps the last)
+    if (g_mode.load(std::memory_order_relaxed) != kModeOldConst) dkCmdBufSetBlendConst(R.cmd, 0.f, 0.f, 0.f, 0.f);
     if (r.immediates) {
         dkCmdBufBindUniformBuffer(R.cmd, DkStage_Vertex, swdk::kImmediatesUboSlot, r.immediates, 256);
         dkCmdBufBindUniformBuffer(R.cmd, DkStage_Fragment, swdk::kImmediatesUboSlot, r.immediates, 256);
@@ -612,11 +646,37 @@ void bind_stage(Replay& r, const Stage& s, DkStage stage) {
     }
 }
 
+// mp2-nx (deko-14): a draw the test cycle's mode hides (never the Dear ImGui overlay)
+bool cycle_hides(const Replay& r) {
+    const int mode = g_mode.load(std::memory_order_relaxed);
+    if (mode < kModeSkipDst) return false;
+    if (r.vb[0].b && r.vb[0].b->ui) return false;
+    const uint8_t k = r.pipe->blendKinds;
+    switch (mode) {
+    case kModeSkipDst: return k & kBlendDst;
+    case kModeSkipSrc1: return k & kBlendSrc1;
+    case kModeSkipConst: return k & kBlendConst;
+    case kModeSkipBlended: return k & kBlendAny;
+    default: return false;
+    }
+}
+
 bool prepare_draw(Replay& r) {
     if (!r.inPass || !r.pipe) return false;
     if (!pipeline_ready(r.pipe)) {
         r.skippedDraws++;
         return false;
+    }
+    if (g_cycleOn) {
+        g_modeDraws++;
+        if (cycle_hides(r)) {
+            g_modeHidden++;
+            return false;
+        }
+        if (g_mode.load(std::memory_order_relaxed) == kModeRebind) {
+            r.boundPipe = nullptr;
+            r.bindingsDirty = r.vbDirty = true;
+        }
     }
     bind_pipeline(r, r.pipe);
     if (r.bindingsDirty) {
@@ -949,6 +1009,40 @@ void flush_locked(const char* why) {
     if (!g_queueOps.empty()) submit_locked(why);
 }
 
+// mp2-nx (deko-14): the test cycle, at every present
+void cycle_tick() {
+    static bool decided = false;
+    if (!decided) {
+        decided = true;
+        const long fixed = swdk::env_long("MP2DK_MODE", 0);
+        g_cycleSeconds = uint64_t(std::max(0L, swdk::env_long("MP2DK_CYCLE", 0)));
+        if (fixed >= 1 && fixed <= kModeCount) {
+            g_cycleOn = true;
+            g_cycleSeconds = 0;
+            cycle_set(int(fixed) - 1);
+            log("test cycle: holding mode %ld (MP2DK_MODE)", fixed);
+        } else if (g_cycleSeconds) {
+            g_cycleOn = true;
+            g_cycleStart = armGetSystemTick();
+            log("test cycle: %d modes, %llu s each (MP2DK_CYCLE)", int(kModeCount), (unsigned long long)g_cycleSeconds);
+        }
+    }
+    if (!g_cycleOn) return;
+    if (g_cycleSeconds) {
+        const uint64_t s = armTicksToNs(armGetSystemTick() - g_cycleStart) / 1'000'000'000ull;
+        cycle_set(int((s / g_cycleSeconds) % kModeCount));
+        g_cycleLeft = int(g_cycleSeconds - s % g_cycleSeconds);
+    }
+    const int m = g_mode.load(std::memory_order_relaxed);
+    if (g_cycleSeconds)
+        snprintf(g_cycleLabel, sizeof g_cycleLabel, "Test %d of %d: %s (%d s)", m + 1, int(kModeCount), kModeNames[m],
+                 g_cycleLeft);
+    else
+        snprintf(g_cycleLabel, sizeof g_cycleLabel, "Test %d of %d: %s", m + 1, int(kModeCount), kModeNames[m]);
+}
+
+const char* cycle_label() { return g_cycleOn ? g_cycleLabel : nullptr; }
+
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "
         "%llu uploads, %llu compute dispatches skipped",
@@ -958,6 +1052,8 @@ void encoder_report() {
 }
 
 }  // namespace mp2dk
+
+extern "C" const char* mp2nx_dk_cycle_label(void) { return mp2dk::on() ? mp2dk::cycle_label() : nullptr; }
 
 using namespace mp2dk;
 

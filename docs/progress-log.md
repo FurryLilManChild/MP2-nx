@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 2026-11-04: deko-13 result, deko-14 (test cycle)
+
+- deko-13: two runs, no crash, about 60 fps. Process memory about 1,700 MiB against about 1,950 MiB on deko-11
+  (scenes not identical). The crash.txt in the logs is from 14:33 (deko-4 to deko-7 era): its pc lands on a cmp in
+  deko-13, so it is not from this build.
+- The diagnostics answered no: one texture sampled before a write ('Render texture', once at start), zero dropped
+  copies or uploads. Missing texture data is ruled out.
+- The owner's photos: whole surface pieces whitewashed (texture still visible under the white), changing with small
+  camera moves, near surfaces too. Points at per-draw brightness or blending, not textures or mips.
+- Found while reading: WebGPU starts every render pass with a blend constant of 0; the bridge kept the last value.
+- deko-14: the blend constant is reset at every pass start. deko3d_env.txt MP2DK_CYCLE=<seconds> steps through
+  7 modes in-game without a restart (shown on screen under the FPS counter, logged at each change): normal, the old
+  blend constant, every draw's settings re-sent, and hiding draws whose blending reads the screen, is dual-source,
+  uses the constant, or blends at all (the Dear ImGui overlay is never hidden). MP2DK_MODE=<n> holds one mode. A
+  blending census is logged with the pipeline report. The owner's dksh_local.bin is bundled as
+  romfs:/initial_dksh_cache.bin (not committed).
+
 ## 2026-11-04: deko-12 (diagnostics) and prep while the owner was away; deko-13 = both
 
 - deko-13 (built 17:37, not yet tested) is deko-12 plus the Null buffer fix below; deko-12 itself was never run.

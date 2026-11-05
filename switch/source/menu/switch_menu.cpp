@@ -42,6 +42,7 @@ extern "C" bool mp2nx_dk_active(void);
 extern "C" bool mp2nx_dk_fell_back(void);
 extern "C" bool mp2nx_dk_chosen(void);
 extern "C" void mp2nx_dk_set_chosen(bool on);
+extern "C" const char* mp2nx_dk_cycle_label(void);
 #endif
 
 namespace PortDebug::SwitchMenu {
@@ -864,6 +865,14 @@ void DrawAlways() {
     dl->AddText(font, small, ImVec2(pos.x + 2, pos.y + 2), Col(0, 0, 0, 0.8f), buf);
     dl->AddText(font, small, pos, Col(1, 1, 0.4f), buf);
   }
+#if MP2NX_DEKO3D
+  // mp2-nx (deko-14): the deko3d test cycle's mode (deko3d_env.txt MP2DK_CYCLE or MP2DK_MODE)
+  if (const char* test = mp2nx_dk_cycle_label()) {
+    const ImVec2 pos(display.y * 0.02f, display.y * 0.02f + small * 1.3f);
+    dl->AddText(font, small, ImVec2(pos.x + 2, pos.y + 2), Col(0, 0, 0, 0.9f), test);
+    dl->AddText(font, small, pos, Col(0.4f, 1, 1), test);
+  }
+#endif
   if (!sToast.empty() && now < sToastUntil) {
     const float w = TextWidth(font, small, sToast);
     const ImVec2 pos((display.x - w) * 0.5f, display.y * 0.88f);
