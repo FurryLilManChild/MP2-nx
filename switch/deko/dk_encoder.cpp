@@ -99,6 +99,7 @@ struct Attachment {
     View* view = nullptr;
     View* resolve = nullptr;
     bool clear = false;
+    bool discard = false;  // mp2-nx (deko-17): StoreOp Discard
     WGPUColor clearValue{};
 };
 struct PassDesc {
@@ -106,6 +107,7 @@ struct PassDesc {
     uint32_t colorCount = 0;
     View* depth = nullptr;
     bool clearDepth = false, clearStencil = false;
+    bool discardDepth = false;  // mp2-nx (deko-17): depth StoreOp Discard
     float depthValue = 1.0f;
     uint8_t stencilValue = 0;
 };
@@ -286,23 +288,25 @@ void queue_push(QueueOp& q) {
 // without a restart (the mode is read at every draw); MP2DK_MODE=<n> holds one mode instead. The mode is
 // shown on screen under the FPS counter (mp2nx_dk_cycle_label, switch_menu.cpp) and logged when it changes.
 // The Dear ImGui overlay is never skipped.
-// mp2-nx (deko-16): deko-15 found the white patches and grey strips are see-through blends
-// (SrcAlpha, OneMinusSrcAlpha) drawn over correct surfaces; full-size textures, unfilled levels and the other
-// blend kinds changed nothing. The see-through pipelines are split into 6 groups by build order (RPipe::id % 6),
-// one group hidden per mode.
+// mp2-nx (deko-17): deko-16's screenshots put the white floor and grey strips in see-through group 2, which
+// hid only three pipelines (by label hash, kSuspects). One mode hides each; one samples the small EFB copies
+// ('Resolved Texture', 51x51 in the world pipelines) as transparent black; one applies WebGPU's rule that a
+// target a pass threw away (StoreOp Discard) reads as zeros; one hides the rest of group 2.
 enum CycleMode : int {
-    kModeNormal, kModeGroup0, kModeGroup1, kModeGroup2, kModeGroup3, kModeGroup4, kModeGroup5,
+    kModeNormal, kModeSuspect1, kModeSuspect2, kModeSuspect3, kModeBlankResolved, kModeDiscardRules, kModeRestOfGroup2,
     kModeCount
 };
 constexpr uint32_t kGroups = 6;
+const char* const kSuspects[3] = {"GX Pipeline 8b66dcab231efa19", "GX Pipeline 50d2b937df92bb30",
+                                  "GX Pipeline f04c1df9b8e47a11"};
 const char* const kModeNames[kModeCount] = {
     "normal",
-    "see-through group 1 of 6: hidden",
-    "see-through group 2 of 6: hidden",
-    "see-through group 3 of 6: hidden",
-    "see-through group 4 of 6: hidden",
-    "see-through group 5 of 6: hidden",
-    "see-through group 6 of 6: hidden",
+    "pipeline 8b66dcab hidden",
+    "pipeline 50d2b937 hidden",
+    "pipeline f04c1df9 hidden",
+    "small EFB copies blank",
+    "WebGPU discard rule",
+    "rest of group 2 hidden",
 };
 std::atomic<int> g_mode{kModeNormal};
 bool g_cycleOn = false;
@@ -312,6 +316,10 @@ uint64_t g_modeDraws = 0, g_modeHidden = 0;
 char g_cycleLabel[128];
 // mp2-nx (deko-16): the test cycle's screenshots (shot_take_locked)
 bool g_shotPending = false;
+// mp2-nx (deko-17): passes that loaded a target the last pass threw away; samples of such textures
+uint64_t g_discardLoads = 0, g_discardDepthLoads = 0;
+std::atomic<uint64_t> g_discardSamples{0};
+Tex* g_resolvedTex = nullptr;  // the last small EFB copy a draw sampled (retained), for the screenshots
 char g_shotName[96];
 swdk::Block g_shotBuf;
 constexpr uint64_t kShotLoops = 3;
@@ -435,6 +443,7 @@ void copy_image(Replay& r, Tex* src, uint32_t srcMip, WGPUOrigin3D so, Tex* dst,
     if (w == 0 || h == 0) return;
     if (dst->depth != src->depth) dropped_copy("note: a copy between depth and colour", dst, dstMip, dO, e);
     dst->written = true;
+    dst->discarded = false;
     if (dstMip < 32) dst->mipsWritten.fetch_or(1u << dstMip, std::memory_order_relaxed);
     if (src->compressed) {
         w = (w + src->blockW - 1) / src->blockW;
@@ -465,6 +474,7 @@ void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows,
     }
     const uint32_t w = std::min(e.width, lw - o.x), h = std::min(e.height, lh - o.y);
     if (w == 0 || h == 0) return;
+    t->discarded = false;
     if (src != g_zero.gpu) {
         t->written = true;
         if (mip < 32) t->mipsWritten.fetch_or(1u << mip, std::memory_order_relaxed);
@@ -481,6 +491,10 @@ void end_pass(Replay& r) {
     if (!r.inPass) return;
     // resolve targets: the single-sampled colour copied into them
     const PassDesc& p = *r.pass;
+    // mp2-nx (deko-17): what this pass threw away (WebGPU: it reads as zeros until written again)
+    for (uint32_t i = 0; i < p.colorCount; i++)
+        if (p.colors[i].view && p.colors[i].view->tex) p.colors[i].view->tex->discarded = p.colors[i].discard;
+    if (p.depth && p.depth->tex) p.depth->tex->discarded = p.discardDepth;
     bool resolved = false;
     for (uint32_t i = 0; i < p.colorCount; i++) {
         const Attachment& a = p.colors[i];
@@ -596,8 +610,27 @@ void begin_pass(Replay& r, const PassDesc& p) {
     const DkScissor sc = {0, 0, r.width, r.height};
     dkCmdBufSetViewports(R.cmd, 0, &vp, 1);
     dkCmdBufSetScissors(R.cmd, 0, &sc, 1);
+    // mp2-nx (deko-17): a target the last pass threw away and this one loads (WebGPU: zeros)
+    const bool discardRules = g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeDiscardRules;
+    bool lazyColor[8] = {};
     for (uint32_t i = 0; i < bound; i++) {
         const Attachment& a = p.colors[i];
+        if (a.clear || !colorPtrs[i] || !a.view || !a.view->tex || !a.view->tex->discarded) continue;
+        g_discardLoads++;
+        lazyColor[i] = discardRules;
+    }
+    bool lazyDepth = false;
+    if (depthPtr && !p.clearDepth && p.depth->tex->discarded) {
+        g_discardLoads++;
+        g_discardDepthLoads++;
+        lazyDepth = discardRules;
+    }
+    for (uint32_t i = 0; i < bound; i++) {
+        const Attachment& a = p.colors[i];
+        if (lazyColor[i]) {
+            dkCmdBufClearColorFloat(R.cmd, i, DkColorMask_RGBA, 0.f, 0.f, 0.f, 0.f);
+            continue;
+        }
         if (!a.clear || !colorPtrs[i] || !a.view || !a.view->tex || !a.view->tex->valid) continue;
         const WGPUColor& c = a.clearValue;
         if (is_int_format(a.view->tex->wformat)) {
@@ -606,7 +639,9 @@ void begin_pass(Replay& r, const PassDesc& p) {
             dkCmdBufClearColorFloat(R.cmd, i, DkColorMask_RGBA, float(c.r), float(c.g), float(c.b), float(c.a));
         }
     }
-    if (depthPtr && (p.clearDepth || p.clearStencil))
+    if (lazyDepth)
+        dkCmdBufClearDepthStencil(R.cmd, true, 0.f, 0xFF, p.clearStencil ? p.stencilValue : 0);
+    else if (depthPtr && (p.clearDepth || p.clearStencil))
         dkCmdBufClearDepthStencil(R.cmd, p.clearDepth, p.depthValue, p.clearStencil ? 0xFF : 0, p.stencilValue);
     // everything is bound again in a pass
     r.boundPipe = nullptr;
@@ -662,6 +697,12 @@ void bind_stage(Replay& r, const Stage& s, DkStage stage) {
                 if (se && dko::alive(se->sampler, "a bind group's sampler")) samp = se->sampler;
             }
             dkCmdBufBindTexture(R.cmd, stage, b.slot, dko::texture_handle(view, samp));
+            // mp2-nx (deko-17): the small EFB copy this frame uses, for the screenshots
+            if (g_cycleOn && view && view->tex && view->tex->smallResolved == 1 && view->tex != g_resolvedTex) {
+                tex_retain(view->tex);
+                if (g_resolvedTex) tex_release(g_resolvedTex);
+                g_resolvedTex = view->tex;
+            }
             continue;
         }
         if (!e || !e->buf || !e->buf->mem) continue;
@@ -697,10 +738,17 @@ template <class F> bool samples_any(const Replay& r, F&& match) {
 std::vector<uint32_t> g_loggedPipes;
 bool cycle_hides(const Replay& r) {
     const int mode = g_mode.load(std::memory_order_relaxed);
-    if (mode < kModeGroup0) return false;
+    if (mode != kModeSuspect1 && mode != kModeSuspect2 && mode != kModeSuspect3 && mode != kModeRestOfGroup2)
+        return false;
     if (r.vb[0].b && r.vb[0].b->ui) return false;
-    if (!(r.pipe->blendKinds & kBlendAlpha)) return false;
-    if (r.pipe->id % kGroups != uint32_t(mode - kModeGroup0)) return false;
+    RPipe* p = r.pipe;
+    if (p->tag < 0) {
+        p->tag = 0;
+        for (int i = 0; i < 3; i++)
+            if (p->label.find(kSuspects[i]) != std::string::npos) p->tag = int8_t(i + 1);
+    }
+    if (mode != kModeRestOfGroup2) return p->tag == mode - kModeSuspect1 + 1;
+    if (p->tag != 0 || !(p->blendKinds & kBlendAlpha) || p->id % kGroups != 1) return false;
     if (g_loggedPipes.size() < 400 &&
         std::find(g_loggedPipes.begin(), g_loggedPipes.end(), r.pipe->id) == g_loggedPipes.end()) {
         g_loggedPipes.push_back(r.pipe->id);
@@ -712,7 +760,7 @@ bool cycle_hides(const Replay& r) {
                               v->tex->height);
             return false;
         });
-        log("test cycle: group %d hides pipeline %u '%s', textures:%s", mode - kModeGroup0 + 1, r.pipe->id,
+        log("test cycle: mode %d hides pipeline %u '%s', textures:%s", mode + 1, r.pipe->id,
             r.pipe->label.c_str(), n ? tex : " none");
     }
     return true;
@@ -1168,8 +1216,66 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
     const DkCopyBuf buf = {g_shotBuf.gpu, w * 4, w * 4 * h};
     dkCmdBufCopyImageToBuffer(R.cmd, &v, &rect, &buf, 0);
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    // mp2-nx (deko-17): the small EFB copy too (the white floor's suspect)
+    static swdk::Block resolvedBuf;
+    Tex* rt = g_resolvedTex && g_resolvedTex->magic == dko::kAlive && g_resolvedTex->valid ? g_resolvedTex : nullptr;
+    const bool rgba = rt && (rt->wformat == WGPUTextureFormat_RGBA8Unorm || rt->wformat == WGPUTextureFormat_BGRA8Unorm);
+    if (rt && !rgba) log("screenshot: the small EFB copy is format 0x%X, not saved", unsigned(rt->wformat));
+    const uint32_t rw = rgba ? rt->width : 0, rh = rgba ? rt->height : 0;
+    if (rgba && !resolvedBuf) resolvedBuf = swdk::block_create_cached(128 * 128 * 4, "screenshots (EFB copy)");
+    const bool dumpResolved = rgba && resolvedBuf && rw * rh * 4 <= resolvedBuf.size;
+    if (dumpResolved) {
+        const DkImageView rv = level_view(rt, 0);
+        const DkImageRect rr = {0, 0, 0, rw, rh, 1};
+        const DkCopyBuf rb = {resolvedBuf.gpu, rw * 4, rw * 4 * rh};
+        dkCmdBufCopyImageToBuffer(R.cmd, &rv, &rr, &rb, 0);
+        dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    }
     swdk::submit("a screenshot");
     dkQueueWaitIdle(R.queue);
+    if (dumpResolved) {
+        // colour on the left, alpha as grey on the right, 4x size; bottom row first
+        armDCacheFlush(resolvedBuf.cpu, rw * rh * 4);
+        const bool bgra = rt->wformat == WGPUTextureFormat_BGRA8Unorm;
+        const uint32_t sc = 4, fw = rw * 2 * sc, fh = rh * sc, frow = (fw * 3 + 3) & ~3u, fdata = frow * fh;
+        auto f2 = std::make_shared<std::vector<uint8_t>>(54 + size_t(fdata), 0);
+        uint8_t* h2 = f2->data();
+        auto p32 = [&](int at, uint32_t x) { memcpy(h2 + at, &x, 4); };
+        h2[0] = 'B';
+        h2[1] = 'M';
+        p32(2, 54 + fdata);
+        p32(10, 54);
+        p32(14, 40);
+        p32(18, fw);
+        p32(22, fh);
+        h2[26] = 1;
+        h2[28] = 24;
+        p32(34, fdata);
+        for (uint32_t oy = 0; oy < fh; oy++) {
+            const uint8_t* srow = resolvedBuf.cpu + size_t(rh - 1 - oy / sc) * rw * 4;
+            uint8_t* d = h2 + 54 + size_t(oy) * frow;
+            for (uint32_t x = 0; x < rw * 2 * sc; x++, d += 3) {
+                const uint32_t sx = (x / sc) % rw;
+                const uint8_t* px = srow + sx * 4;
+                if (x / sc < rw) {
+                    d[0] = bgra ? px[0] : px[2];
+                    d[1] = px[1];
+                    d[2] = bgra ? px[2] : px[0];
+                } else {
+                    d[0] = d[1] = d[2] = px[3];
+                }
+            }
+        }
+        std::string p2 = std::string(MP2NX_APP_DIR "/shots/") + g_shotName + "_efbcopy_" + std::to_string(rw) + "x" +
+                         std::to_string(rh) + ".bmp";
+        std::thread([f2, p2]() {
+            mkdir(MP2NX_APP_DIR "/shots", 0777);
+            if (FILE* f = fopen(p2.c_str(), "wb")) {
+                fwrite(f2->data(), 1, f2->size(), f);
+                fclose(f);
+            }
+        }).detach();
+    }
     armDCacheFlush(g_shotBuf.cpu, bytes);  // (drops stale cache lines before the CPU reads the GPU's copy)
     // half size (every other pixel), a 24-bit BMP, bottom row first
     const uint32_t ow = w / 2, oh = h / 2, row = (ow * 3 + 3) & ~3u, data = row * oh;
@@ -1209,7 +1315,9 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
         }
     }).detach();
 }
-bool cycle_lod0() { return false; }  // (deko-15's "full-size textures only" mode; gone in deko-16)
+bool cycle_blank_resolved() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeBlankResolved; }
+bool cycle_discard_rules() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeDiscardRules; }
+void count_discarded_sample() { g_discardSamples.fetch_add(1, std::memory_order_relaxed); }
 
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "
@@ -1218,6 +1326,10 @@ void encoder_report() {
         (unsigned long long)g_totals.passes, (unsigned long long)g_totals.copies, (unsigned long long)g_totals.uploads,
         (unsigned long long)g_totals.computes);
     log("encoder: %llu depth textures cleared to 0 at creation", (unsigned long long)g_totals.depthZeroed);
+    log("encoder: %llu passes loaded a target the pass before threw away (%llu of them depth), %llu draws sampled "
+        "a thrown-away texture",
+        (unsigned long long)g_discardLoads, (unsigned long long)g_discardDepthLoads,
+        (unsigned long long)g_discardSamples.load());
 }
 
 }  // namespace mp2dk
@@ -1262,6 +1374,7 @@ WGPURenderPassEncoder __wrap_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncode
         p.colors[i].view = hold(enc, a.view);
         p.colors[i].resolve = a.resolveTarget ? hold(enc, a.resolveTarget) : nullptr;
         p.colors[i].clear = a.loadOp == WGPULoadOp_Clear;
+        p.colors[i].discard = a.storeOp == WGPUStoreOp_Discard;
         p.colors[i].clearValue = a.clearValue;
     }
     if (d->depthStencilAttachment) {
@@ -1269,6 +1382,7 @@ WGPURenderPassEncoder __wrap_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncode
         p.depth = hold(enc, z.view);
         p.clearDepth = z.depthLoadOp == WGPULoadOp_Clear;
         p.clearStencil = z.stencilLoadOp == WGPULoadOp_Clear;
+        p.discardDepth = z.depthStoreOp == WGPUStoreOp_Discard;
         p.depthValue = z.depthClearValue;
         p.stencilValue = uint8_t(z.stencilClearValue);
     }

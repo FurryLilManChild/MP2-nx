@@ -2,6 +2,20 @@
 
 Newest first.
 
+## 2026-11-04: deko-16b result, deko-17 (group 2 suspects, EFB copy, WebGPU discard rule)
+
+- Screenshots work (21 per run, 640x360 BMPs, no visible freeze). Buffers zeroed at creation: no change.
+- In the door room (loop 2) and the white-floored room (loop 3), only group 2 (see-through pipelines with
+  id % 6 == 1) changed the fault: the grey strips and the white floor went black. Group 2 hid only three
+  pipelines in all three loops: 'GX Pipeline 8b66dcab231efa19' and '50d2b937df92bb30' (no textures) and
+  'f04c1df9b8e47a11' (two 64x8 textures and a 51x51 'Resolved Texture', an EFB copy most world pipelines sample).
+- Gap found in Aurora's code: discard_dead_stores ends passes with StoreOp Discard; WebGPU (Dawn) then reads that
+  target as zeros until it is written again. The bridge ignored store ops and kept the old contents.
+- deko-17 cycle: normal; each suspect hidden; small 'Resolved Texture's (up to 128x128) sampled as transparent
+  black; the discard rule (a discarded target loaded by the next pass is cleared to zero, sampling one reads the
+  empty image); the rest of group 2 hidden. Counts of discarded loads and samples are logged every minute, and
+  each screenshot also saves the last small EFB copy (colour and alpha, 4x) as *_efbcopy_WxH.bmp.
+
 ## 2026-11-04: deko-15 result, deko-16 (buffers zeroed, see-through groups, screenshots)
 
 - deko-15 in Temple Grounds and the door room. Test 5 (see-through blends hidden, SrcAlpha/OneMinusSrcAlpha)

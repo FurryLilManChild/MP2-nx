@@ -448,16 +448,16 @@ DkResHandle texture_handle(View* v, Samp* s) {
                            unsigned(v->tex->wformat), have & want, want);
         }
     }
-    uint32_t sampler = uint32_t(swdk::kSamplerNearestClamp);
-    if (s) {
-        if (mp2dk::cycle_lod0()) {
-            // mp2-nx (deko-15 test cycle): only the full-size level (mip 0) is ever read
-            DkSampler k = s->sampler;
-            k.lodClampMin = 0.f;
-            k.lodClampMax = 0.f;
-            sampler = swdk::sampler_slot(k, s->key ^ 0x9E3779B97F4A7C15ull);
-        } else {
-            sampler = swdk::sampler_slot(s->sampler, s->key);
+    const uint32_t sampler = s ? swdk::sampler_slot(s->sampler, s->key) : uint32_t(swdk::kSamplerNearestClamp);
+    // mp2-nx (deko-17 test cycle)
+    if (image != swdk::kEmptyImage && v && v->tex) {
+        Tex* t = v->tex;
+        if (t->smallResolved < 0)
+            t->smallResolved = t->label == "Resolved Texture" && t->width <= 128 && t->height <= 128 ? 1 : 0;
+        if (t->smallResolved && mp2dk::cycle_blank_resolved()) return dkMakeTextureHandle(swdk::kEmptyImage, sampler);
+        if (t->discarded.load(std::memory_order_relaxed)) {
+            mp2dk::count_discarded_sample();
+            if (mp2dk::cycle_discard_rules()) return dkMakeTextureHandle(swdk::kEmptyImage, sampler);
         }
     }
     return dkMakeTextureHandle(image, sampler);

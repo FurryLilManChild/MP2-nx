@@ -34,8 +34,10 @@ struct Buf;  // dk_bridge.hpp
 // mp2-nx (deko-11, dk_encoder.cpp): a new texture's memory is zeroed by the next submit, ahead of its
 // writes (Dawn's textures start as zeros; the image heap hands back memory other textures used)
 void texture_zero_later(aurora::gfx::dk::Tex* t);
-// mp2-nx (deko-15, dk_encoder.cpp): the test cycle's "full-size textures only" mode is on
-bool cycle_lod0();
+// mp2-nx (deko-17, dk_encoder.cpp): the test cycle's modes that change what a draw samples
+bool cycle_blank_resolved();  // small 'Resolved Texture's sampled as transparent black
+bool cycle_discard_rules();   // a texture thrown away (StoreOp Discard) sampled as zeros
+void count_discarded_sample();
 }
 
 namespace aurora::gfx::dk {
@@ -64,6 +66,10 @@ struct Tex {
     // sampled with levels never written is logged once (texture_handle)
     std::atomic<uint32_t> mipsWritten{0};
     std::atomic<bool> warnedMips{false};
+    // mp2-nx (deko-17): the last pass that wrote it ended with StoreOp Discard (WebGPU: it reads as zeros
+    // until written again); and whether it is a small 'Resolved Texture' (an EFB copy, -1 not yet known)
+    std::atomic<bool> discarded{false};
+    int8_t smallResolved = -1;
     uint8_t blockW = 1, blockH = 1, blockBytes = 4;
     DkImage image{};
     swdk::ImageAlloc mem;
