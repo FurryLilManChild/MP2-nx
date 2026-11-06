@@ -125,6 +125,334 @@ index b1a0d8b9a..ab236243d 100644
  }
  } // namespace aurora::device
 +#endif // !__SWITCH__
+diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
+index 28f8828b1..ef77ace09 100644
+--- a/lib/gfx/encoding.cpp
++++ b/lib/gfx/encoding.cpp
+@@ -20,6 +20,9 @@
+ #include "../webgpu/gpu_prof.hpp"
+ 
+ #include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <mutex>
+ #include <array>
+ #include <cstdint>
+ #include <cstdlib>
+@@ -208,6 +211,222 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
+ #endif
+ }
+ 
++
++// ---- Port (mp2-nx frame capture): the left stick click on the Switch (switch_menu.cpp) asks for one;
++// the next frame's render passes each save their colour target at the pass end, and each EFB copy its
++// destination, as PAM files (RGBA, 8 bits) in a folder of their own, with passes.txt listing every pass.
++// Both renderers go through here, so a Vulkan capture and a deko3d one of the same spot compare pass by
++// pass. deko3d's bridge adds draws.txt (every draw of the frame) while aurora_frame_capture_dir() is set.
++namespace capture {
++struct Item {
++  wgpu::Buffer buffer;
++  uint32_t width = 0, height = 0, rowBytes = 0, texel = 0;
++  wgpu::TextureFormat format = wgpu::TextureFormat::Undefined;
++  std::string file;
++};
++std::mutex g_mutex;
++std::string g_requestDir;           // set by aurora_frame_capture_request, taken by the next pass
++std::string g_dir;                  // the capture being recorded or saved ("" none)
++bool g_recording = false;
++uint64_t g_frameId = 0;
++std::vector<Item> g_items;
++std::string g_text;
++uint32_t g_pending = 0;
++uint32_t g_written = 0;
++std::string g_lastDone;             // the last finished capture's folder (the toast)
++uint32_t g_doneCount = 0;
++constexpr size_t kMaxItems = 64;
++
++uint32_t texel_bytes(wgpu::TextureFormat f) {
++  switch (f) {
++  case wgpu::TextureFormat::RGBA8Unorm:
++  case wgpu::TextureFormat::RGBA8UnormSrgb:
++  case wgpu::TextureFormat::BGRA8Unorm:
++  case wgpu::TextureFormat::BGRA8UnormSrgb:
++  case wgpu::TextureFormat::R32Float:
++    return 4;
++  case wgpu::TextureFormat::RGBA16Float:
++    return 8;
++  case wgpu::TextureFormat::R8Unorm:
++    return 1;
++  case wgpu::TextureFormat::RG8Unorm:
++  case wgpu::TextureFormat::R16Float:
++    return 2;
++  default:
++    return 0;
++  }
++}
++
++float half_to_float(uint16_t h) {
++  const uint32_t sign = (h >> 15) & 1, exp = (h >> 10) & 0x1F, man = h & 0x3FF;
++  float v;
++  if (exp == 0) {
++    v = std::ldexp(static_cast<float>(man), -24);
++  } else if (exp == 31) {
++    v = man ? 0.f : 65504.f;
++  } else {
++    v = std::ldexp(static_cast<float>(man | 0x400), static_cast<int>(exp) - 25);
++  }
++  return sign ? -v : v;
++}
++
++uint8_t unorm8(float v) { return static_cast<uint8_t>(std::clamp(v, 0.f, 1.f) * 255.f + 0.5f); }
++
++// Called with g_mutex held.
++void add(wgpu::CommandEncoder& cmd, const wgpu::Texture& texture, uint32_t width, uint32_t height,
++         const std::string& file, std::string& note) {
++  if (!texture || width == 0 || height == 0) {
++    note += " (no texture)";
++    return;
++  }
++  const wgpu::TextureFormat format = texture.GetFormat();
++  const uint32_t texel = texel_bytes(format);
++  if (texel == 0) {
++    note += fmt::format(" (format {} not saved)", static_cast<int>(format));
++    return;
++  }
++  if (g_items.size() >= kMaxItems) {
++    note += " (not saved: the capture is full)";
++    return;
++  }
++  Item item;
++  item.width = width;
++  item.height = height;
++  item.texel = texel;
++  item.format = format;
++  item.rowBytes = (width * texel + 255) & ~255u;
++  item.file = file;
++  const wgpu::BufferDescriptor desc{
++      .label = "Frame capture",
++      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++      .size = uint64_t(item.rowBytes) * height,
++  };
++  item.buffer = g_device.CreateBuffer(&desc);
++  const wgpu::TexelCopyTextureInfo src{.texture = texture};
++  const wgpu::TexelCopyBufferInfo dst{
++      .layout = wgpu::TexelCopyBufferLayout{.offset = 0, .bytesPerRow = item.rowBytes, .rowsPerImage = height},
++      .buffer = item.buffer,
++  };
++  const wgpu::Extent3D size{.width = width, .height = height, .depthOrArrayLayers = 1};
++  cmd.CopyTextureToBuffer(&src, &dst, &size);
++  note += fmt::format(" -> {} (format {})", file, static_cast<int>(format));
++  g_items.push_back(std::move(item));
++}
++
++void write_item(const Item& item, const uint8_t* data) {
++  std::vector<uint8_t> out;
++  const std::string header = fmt::format("P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
++                                         item.width, item.height);
++  out.reserve(header.size() + size_t(item.width) * item.height * 4);
++  out.insert(out.end(), header.begin(), header.end());
++  for (uint32_t y = 0; y < item.height; ++y) {
++    const uint8_t* row = data + size_t(y) * item.rowBytes;
++    for (uint32_t x = 0; x < item.width; ++x) {
++      const uint8_t* t = row + size_t(x) * item.texel;
++      uint8_t px[4] = {0, 0, 0, 255};
++      switch (item.format) {
++      case wgpu::TextureFormat::BGRA8Unorm:
++      case wgpu::TextureFormat::BGRA8UnormSrgb:
++        px[0] = t[2], px[1] = t[1], px[2] = t[0], px[3] = t[3];
++        break;
++      case wgpu::TextureFormat::RGBA16Float: {
++        uint16_t h[4];
++        std::memcpy(h, t, 8);
++        for (int c = 0; c < 4; ++c) px[c] = unorm8(half_to_float(h[c]));
++      } break;
++      case wgpu::TextureFormat::R8Unorm:
++        px[0] = px[1] = px[2] = t[0];
++        break;
++      case wgpu::TextureFormat::RG8Unorm:
++        px[0] = t[0], px[1] = t[1];
++        break;
++      case wgpu::TextureFormat::R16Float: {
++        uint16_t h;
++        std::memcpy(&h, t, 2);
++        px[0] = px[1] = px[2] = unorm8(half_to_float(h));
++      } break;
++      case wgpu::TextureFormat::R32Float: {
++        float f;
++        std::memcpy(&f, t, 4);
++        px[0] = px[1] = px[2] = unorm8(f);
++      } break;
++      default:
++        std::memcpy(px, t, 4);
++        break;
++      }
++      out.insert(out.end(), px, px + 4);
++    }
++  }
++  const std::string path = g_dir + "/" + item.file;
++  if (FILE* f = std::fopen(path.c_str(), "wb")) {
++    std::fwrite(out.data(), 1, out.size(), f);
++    std::fclose(f);
++    ++g_written;
++  } else {
++    Log.warn("frame capture: could not write {}", path);
++  }
++}
++
++// Called with g_mutex held, once every saved item has been written (or failed).
++void finish() {
++  g_text += fmt::format("\n{} of {} pictures saved\n", g_written, g_items.size());
++  const std::string path = g_dir + "/passes.txt";
++  if (FILE* f = std::fopen(path.c_str(), "wb")) {
++    std::fwrite(g_text.data(), 1, g_text.size(), f);
++    std::fclose(f);
++  }
++  Log.info("frame capture: {} ({} pictures)", g_dir, g_written);
++  g_lastDone = g_dir;
++  ++g_doneCount;
++  g_items.clear();
++  g_text.clear();
++  g_dir.clear();
++}
++
++void on_pass(wgpu::CommandEncoder& cmd, const FramePacket& frame, const RenderPass& p, uint32_t passIndex) {
++  std::lock_guard lock{g_mutex};
++  if (!g_recording) {
++    if (g_requestDir.empty() || !g_dir.empty()) {
++      return;
++    }
++    g_dir = std::move(g_requestDir);
++    g_requestDir.clear();
++    g_recording = true;
++    g_frameId = frame.frameId;
++    g_written = 0;
++    g_text = fmt::format("frame capture of frame {} ({})\ncolour load: 1 load, 2 clear; store: 1 store, 2 discard\n\n",
++                         frame.frameId, g_dir);
++  } else if (frame.frameId != g_frameId) {
++    return;
++  }
++  const auto& c = p.colorAttachments[SceneColorAttachmentIndex];
++  size_t draws = 0;
++  for (const auto& command : p.commands) {
++    draws += command.type == CommandType::Draw || command.type == CommandType::CustomDraw;
++  }
++  std::string note = fmt::format(
++      "pass {:3} '{}' {}x{} msaa{} draws {} colour {} store {} depth {} store {}{}", passIndex, p.label, c.size.width,
++      c.size.height, p.msaaSamples, draws, c.loadOp != wgpu::LoadOp::Undefined ? static_cast<int>(c.loadOp) : (c.clear ? 2 : 1),
++      static_cast<int>(c.storeOp), p.clearDepth ? "clear" : "load", static_cast<int>(p.depthStoreOp),
++      p.discardable ? " DISCARDED (not drawn)" : "");
++  if (!p.discardable && p.copySourceTexture) {
++    add(cmd, p.copySourceTexture, c.size.width, c.size.height, fmt::format("p{:03}_target.pam", passIndex), note);
++  }
++  if (p.resolveTarget) {
++    note += fmt::format("\n          EFB copy fmt {} rect {},{} {}x{} to {}x{} mips {} probe {}",
++                        static_cast<int>(p.resolveFormat), p.resolveRect.x, p.resolveRect.y, p.resolveRect.width,
++                        p.resolveRect.height, p.resolveTarget->size.width, p.resolveTarget->size.height,
++                        p.resolveTarget->mipCount, p.probeFace);
++    if (!p.discardable && p.probeFace < 0) {
++      add(cmd, p.resolveTarget->texture, p.resolveTarget->size.width, p.resolveTarget->size.height,
++          fmt::format("p{:03}_copy_{}x{}.pam", passIndex, p.resolveTarget->size.width, p.resolveTarget->size.height),
++          note);
++    }
++  }
++  g_text += note + "\n";
++}
++} // namespace capture
++
+ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
+   ZoneScoped;
+   if (!passInfo.sealed) {
+@@ -218,6 +437,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+     tex_palette_conv::run(cmd, conv);
+   }
+   if (passInfo.discardable) {
++    capture::on_pass(cmd, frame, passInfo, passIndex);  // Port: mp2-nx frame capture (listed only)
+     // This pass has no effect and can be safely discarded (e.g. an empty EFB segment between two back-to-back pass
+     // breaks, or an unresolved offscreen pass).
+     if (passInfo.forceDepthSnapshot) {
+@@ -457,6 +677,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+   if (passInfo.snapshotDepthDst) {
+     tex_copy_conv::snapshot_depth(cmd, passInfo.copySourceDepthView, passInfo.msaaSamples, passInfo.snapshotDepthDst);
+   }
++  capture::on_pass(cmd, frame, passInfo, passIndex);  // Port: mp2-nx frame capture
+ }
+ 
+ constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
+@@ -649,4 +870,60 @@ void bind_texture_group(BindGroupRef ref, const wgpu::RenderPassEncoder& pass) {
+ }
+ 
+ void forget_texture_group() { g_currentTextureGroup = 0; }
++
++// Port: mp2-nx frame capture
++void frame_capture_after_submit() noexcept {
++  std::vector<size_t> pending;
++  {
++    std::lock_guard lock{capture::g_mutex};
++    if (!capture::g_recording) {
++      return;
++    }
++    capture::g_recording = false;
++    capture::g_pending = static_cast<uint32_t>(capture::g_items.size());
++    if (capture::g_pending == 0) {
++      capture::finish();
++      return;
++    }
++  }
++  for (size_t i = 0;; ++i) {
++    wgpu::Buffer buffer;
++    uint64_t bytes = 0;
++    {
++      std::lock_guard lock{capture::g_mutex};
++      if (i >= capture::g_items.size()) break;
++      buffer = capture::g_items[i].buffer;
++      bytes = uint64_t(capture::g_items[i].rowBytes) * capture::g_items[i].height;
++    }
++    buffer.MapAsync(wgpu::MapMode::Read, 0, bytes, wgpu::CallbackMode::AllowSpontaneous,
++                    [i, bytes](wgpu::MapAsyncStatus status, wgpu::StringView) {
++                      std::lock_guard lock{capture::g_mutex};
++                      if (i >= capture::g_items.size()) return;
++                      auto& item = capture::g_items[i];
++                      if (status == wgpu::MapAsyncStatus::Success) {
++                        if (const void* data = item.buffer.GetConstMappedRange(0, bytes)) {
++                          capture::write_item(item, static_cast<const uint8_t*>(data));
++                        }
++                        item.buffer.Unmap();
++                      }
++                      if (--capture::g_pending == 0) capture::finish();
++                    });
++  }
++}
+ } // namespace aurora::gfx
++
++// Port: mp2-nx frame capture (the Switch menu's left stick click; deko3d's bridge)
++extern "C" void aurora_frame_capture_request(const char* dir) {
++  std::lock_guard lock{aurora::gfx::capture::g_mutex};
++  if (!aurora::gfx::capture::g_dir.empty() || !aurora::gfx::capture::g_requestDir.empty()) return;
++  aurora::gfx::capture::g_requestDir = dir;
++}
++extern "C" const char* aurora_frame_capture_dir(void) {
++  // (read on the render thread while the frame is replayed; the string lives until finish())
++  return aurora::gfx::capture::g_recording ? aurora::gfx::capture::g_dir.c_str() : nullptr;
++}
++extern "C" unsigned aurora_frame_capture_done(char* lastDir, unsigned size) {
++  std::lock_guard lock{aurora::gfx::capture::g_mutex};
++  if (lastDir && size) std::snprintf(lastDir, size, "%s", aurora::gfx::capture::g_lastDone.c_str());
++  return aurora::gfx::capture::g_doneCount;
++}
+diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
+index 34ff0f864..7511b7025 100644
+--- a/lib/gfx/frame.cpp
++++ b/lib/gfx/frame.cpp
+@@ -1165,7 +1165,9 @@ void end_frame(EndFrameCallback callback) {
+ 
+ uint32_t current_frame() noexcept { return g_frameIndex; }
+ 
++void frame_capture_after_submit() noexcept;  // encoding.cpp (Port: mp2-nx frame capture)
+ void after_submit() noexcept {
++  frame_capture_after_submit();
+   depth_peek::after_submit();
+   scan_peek::after_submit();
+   efb_copy::after_submit();
 diff --git a/lib/gfx/frame.hpp b/lib/gfx/frame.hpp
 index de8c3f93c..f02a1d834 100644
 --- a/lib/gfx/frame.hpp

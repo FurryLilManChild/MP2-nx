@@ -2,6 +2,22 @@
 
 Newest first.
 
+## 2026-11-06: frame capture (left stick click)
+
+- deko-17 was never run (the owner paused two days). Instead of more hide-a-group cycles: a frame capture, like the
+  Dreamcast projects' F11, in Aurora so both renderers produce one.
+- Left stick click (checked: unbound by default; Echoes puts gyro aim on the right stick click, and the left only
+  takes a radial menu if bound there): switch_menu.cpp makes <app>/captures/capNNN_<deko3d|vulkan>/ and calls
+  aurora_frame_capture_request. Aurora's encoding.cpp then, for the next frame, copies each render pass's
+  colour target at the pass end and each EFB copy's destination to MapRead buffers (64 at most), writes them as
+  PAM (RGBA8; RGBA16F, R8, RG8, R16F, R32F converted) and passes.txt (every pass: label, size, load/store,
+  draws, EFB copy rect and format, the file). frame.cpp's after_submit closes the capture and maps the buffers.
+- deko3d's bridge adds draws.txt: every pass (Aurora's label, targets, load/store/discard) and draw (pipeline id
+  and label, blend factors, write mask, depth state, cull, viewport, scissor, textures) replayed while
+  aurora_frame_capture_dir() is set; written at the next present after the capture ends.
+- The same NRO runs both renderers (the menu's Renderer row), so a Vulkan and a deko3d capture of one spot
+  compare pass by pass. deko3d_env.txt reset to no test cycle for this.
+
 ## 2026-11-04: deko-16b result, deko-17 (group 2 suspects, EFB copy, WebGPU discard rule)
 
 - Screenshots work (21 per run, 640x360 BMPs, no visible freeze). Buffers zeroed at creation: no change.

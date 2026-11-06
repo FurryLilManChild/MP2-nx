@@ -23,6 +23,7 @@
 #include <dolphin/pad.h>
 #include <imgui.h>
 #include <switch.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <cmath>
@@ -35,6 +36,9 @@
 
 extern "C" void mp2nx_load_boost(int reason, int on);
 extern "C" void mp2nx_start_log_flusher(void);
+// Aurora's encoding.cpp: the frame capture (left stick click)
+extern "C" void aurora_frame_capture_request(const char* dir);
+extern "C" unsigned aurora_frame_capture_done(char* lastDir, unsigned size);
 #if MP2NX_DEKO3D
 // switch/source/deko/dk_smoke.cpp: the deko3d phase 0 smoke test
 // switch/deko/dk_surface.cpp: the renderer of this start and the choice for the next
@@ -852,6 +856,51 @@ void DrawAlways() {
       sWatchStateMessage = false;
     } else if (now > sWatchUntil) {
       sWatchStateMessage = false;
+    }
+  }
+  // Frame capture: a left stick click (unbound by default: Echoes binds the right stick click to gyro aim, and
+  // the left only if a radial menu is put on it) saves the next frame's render passes, as PAM pictures and
+  // passes.txt (and on deko3d draws.txt), in <app>/captures/capNNN_<renderer>/.
+  {
+    static bool sStickWas = false;
+    static unsigned sDoneSeen = 0;
+    SDL_Gamepad* pad = PlayerPad();
+    const bool stick = pad != nullptr && SDL_GetGamepadButton(pad, SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    if (stick && !sStickWas && !sVisible) {
+#if MP2NX_DEKO3D
+      const char* renderer = mp2nx_dk_active() ? "deko3d" : "vulkan";
+#else
+      const char* renderer = "vulkan";
+#endif
+      mkdir(MP2NX_APP_DIR "/captures", 0777);
+      char dir[160] = "";
+      for (int n = 1; n < 1000; ++n) {
+        bool taken = false;
+        for (const char* r : {"deko3d", "vulkan"}) {
+          char probe[160];
+          std::snprintf(probe, sizeof probe, MP2NX_APP_DIR "/captures/cap%03d_%s", n, r);
+          struct stat st{};
+          if (stat(probe, &st) == 0) taken = true;
+        }
+        if (!taken) {
+          std::snprintf(dir, sizeof dir, MP2NX_APP_DIR "/captures/cap%03d_%s", n, renderer);
+          break;
+        }
+      }
+      if (dir[0] != 0 && mkdir(dir, 0777) == 0) {
+        aurora_frame_capture_request(dir);
+        Toast("Capturing a frame...", 2000);
+      } else {
+        Toast("Frame capture: could not make a folder", 4000);
+      }
+    }
+    sStickWas = stick;
+    char last[160] = "";
+    const unsigned done = aurora_frame_capture_done(last, sizeof last);
+    if (done != sDoneSeen) {
+      sDoneSeen = done;
+      const char* name = std::strrchr(last, '/');
+      Toast(std::string("Frame capture saved: ") + (name ? name + 1 : last), 5000);
     }
   }
   ImDrawList* dl = ImGui::GetForegroundDrawList();

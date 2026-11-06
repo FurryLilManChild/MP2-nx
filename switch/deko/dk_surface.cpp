@@ -45,6 +45,7 @@ namespace mp2dk {
 void encoder_init();
 void encoder_report();
 void cycle_tick();
+void capture_flush();
 void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h);
 void pipelines_report();
 std::mutex& submit_mutex();
@@ -274,6 +275,10 @@ WGPUStatus __wrap_wgpuSurfacePresent(WGPUSurface s) {
     }
     presented();
     cycle_tick();
+    {
+        std::lock_guard<std::mutex> lock(submit_mutex());
+        capture_flush();
+    }
     maps_poll();
     const uint64_t now = armGetSystemTick();
     if (g_reportAt == 0) g_reportAt = now;

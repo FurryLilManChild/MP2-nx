@@ -34,6 +34,7 @@
 #include <mutex>
 
 extern "C" {
+const char* aurora_frame_capture_dir(void);  // Aurora's encoding.cpp (mp2-nx frame capture)
 WGPUCommandEncoder __real_wgpuDeviceCreateCommandEncoder(WGPUDevice, WGPUCommandEncoderDescriptor const*);
 WGPURenderPassEncoder __real_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncoder, WGPURenderPassDescriptor const*);
 WGPUComputePassEncoder __real_wgpuCommandEncoderBeginComputePass(WGPUCommandEncoder, WGPUComputePassDescriptor const*);
@@ -108,6 +109,7 @@ struct PassDesc {
     View* depth = nullptr;
     bool clearDepth = false, clearStencil = false;
     bool discardDepth = false;  // mp2-nx (deko-17): depth StoreOp Discard
+    char label[48] = "";        // mp2-nx (frame capture): Aurora's pass label
     float depthValue = 1.0f;
     uint8_t stencilValue = 0;
 };
@@ -805,11 +807,95 @@ const char* const kOpNotes[] = {
     "replay: copy texture to texture", "replay: compute",
 };
 
+// ---- mp2-nx (frame capture): while Aurora records a capture (aurora_frame_capture_dir, encoding.cpp), every
+// pass and draw replayed is listed in draws.txt in its folder, written when the capture ends.
+std::string g_capText, g_capDir;
+uint32_t g_capPass = 0, g_capDraw = 0;
+float g_capViewport[4] = {}, g_capScissor[4] = {};
+
+const char* cap_dir() {
+    const char* d = aurora_frame_capture_dir();
+    if (d && g_capDir.empty()) {
+        g_capDir = d;
+        g_capPass = 0;
+        g_capText = "deko3d draws of the frame capture\n"
+                    "blend: on/off, colour src dst op, alpha src dst op (deko3d DkBlendFactor/DkBlendOp numbers)\n"
+                    "depth: test write compare (DkCompareOp)\n\n";
+    }
+    return d;
+}
+
+void cap_pass(const PassDesc& p) {
+    if (!cap_dir()) return;
+    g_capDraw = 0;
+    char line[512];
+    int n = snprintf(line, sizeof line, "\n== pass %u '%s'", g_capPass++, p.label);
+    for (uint32_t i = 0; i < p.colorCount; i++) {
+        const View* v = p.colors[i].view;
+        if (v && v->tex)
+            n += snprintf(line + n, sizeof line - n, " colour%u '%s' %ux%u fmt 0x%X %s%s", i, v->tex->label.c_str(),
+                          v->tex->width, v->tex->height, unsigned(v->tex->wformat), p.colors[i].clear ? "clear" : "load",
+                          p.colors[i].discard ? " discard" : "");
+    }
+    if (p.depth && p.depth->tex)
+        snprintf(line + n, sizeof line - n, " depth '%s' %ux%u %s%s", p.depth->tex->label.c_str(), p.depth->tex->width,
+                 p.depth->tex->height, p.clearDepth ? "clear" : "load", p.discardDepth ? " discard" : "");
+    g_capText += line;
+    g_capText += "\n";
+}
+
+void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, bool indexed) {
+    if (!cap_dir()) return;
+    const RPipe* p = r.pipe;
+    char line[1024];
+    int n = snprintf(line, sizeof line, "draw %u%s %s %u x%u", g_capDraw++, drawn ? "" : " (NOT DRAWN)",
+                     indexed ? "indexed" : "verts", count, instances);
+    if (p) {
+        const DkBlendState& b = p->blend[0];
+        n += snprintf(line + n, sizeof line - n,
+                      " | pipe %u '%s' | blend %s %d %d %d, %d %d %d | write 0x%X | depth %d %d %d | cull %d",
+                      p->id, p->label.c_str(), (p->color.blendEnableMask & 1) ? "on" : "off",
+                      int(b.srcColorBlendFactor), int(b.dstColorBlendFactor), int(b.colorBlendOp),
+                      int(b.srcAlphaBlendFactor), int(b.dstAlphaBlendFactor), int(b.alphaBlendOp),
+                      unsigned(p->colorWrite.masks & 0xF), int(p->depthStencil.depthTestEnable),
+                      int(p->depthStencil.depthWriteEnable), int(p->depthStencil.depthCompareOp),
+                      int(p->rasterizer.cullMode));
+        n += snprintf(line + n, sizeof line - n, " | vp %.0f,%.0f %.0fx%.0f sc %.0f,%.0f %.0fx%.0f", g_capViewport[0],
+                      g_capViewport[1], g_capViewport[2], g_capViewport[3], g_capScissor[0], g_capScissor[1],
+                      g_capScissor[2], g_capScissor[3]);
+        samples_any(r, [&](const View* v) {
+            if (n < int(sizeof line) - 80)
+                n += snprintf(line + n, sizeof line - n, " | tex '%s' %ux%u fmt 0x%X mips %u", v->tex->label.c_str(),
+                              v->tex->width, v->tex->height, unsigned(v->tex->wformat), v->mipCount);
+            return false;
+        });
+    }
+    g_capText += line;
+    g_capText += "\n";
+}
+
+// at each present: a capture that has ended is written out
+void cap_flush() {
+    if (g_capDir.empty() || aurora_frame_capture_dir()) return;
+    const std::string path = g_capDir + "/draws.txt";
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+        fwrite(g_capText.data(), 1, g_capText.size(), f);
+        fclose(f);
+        log("frame capture: %s", path.c_str());
+    }
+    g_capText.clear();
+    g_capText.shrink_to_fit();
+    g_capDir.clear();
+}
+
 void replay(Replay& r, Enc* e) {
     for (const Op& op : e->ops) {
         note(kOpNotes[int(op.type)]);
         switch (op.type) {
-        case OpType::BeginPass: begin_pass(r, e->passes[op.u[0]]); break;
+        case OpType::BeginPass:
+            cap_pass(e->passes[op.u[0]]);
+            begin_pass(r, e->passes[op.u[0]]);
+            break;
         case OpType::EndPass: end_pass(r); break;
         case OpType::SetPipeline:
             r.pipe = static_cast<RPipe*>(op.p);
@@ -842,21 +928,28 @@ void replay(Replay& r, Enc* e) {
             }
             break;
         }
-        case OpType::Draw:
-            if (prepare_draw(r)) {
+        case OpType::Draw: {
+            const bool ok = prepare_draw(r);
+            if (ok) {
                 dkCmdBufDraw(R.cmd, r.pipe->prim, op.u[0], op.u[1], op.u[2], op.u[3]);
                 r.draws++;
             }
+            if (!g_capDir.empty() || aurora_frame_capture_dir()) cap_draw(r, ok, op.u[0], op.u[1], false);
             break;
-        case OpType::DrawIndexed:
-            if (prepare_draw(r)) {
+        }
+        case OpType::DrawIndexed: {
+            const bool ok = prepare_draw(r);
+            if (ok) {
                 dkCmdBufDrawIndexed(R.cmd, r.pipe->prim, op.u[0], op.u[1], op.u[2], op.i[3], op.u[4]);
                 r.draws++;
             }
+            if (!g_capDir.empty() || aurora_frame_capture_dir()) cap_draw(r, ok, op.u[0], op.u[1], true);
             break;
+        }
         case OpType::Viewport: {
             if (!(op.f[2] > 0.f) || !(op.f[3] > 0.f)) break;
             const DkViewport v = {op.f[0], op.f[1], op.f[2], op.f[3], op.f[4], op.f[5]};
+            for (int k = 0; k < 4; k++) g_capViewport[k] = op.f[k];
             dkCmdBufSetViewports(R.cmd, 0, &v, 1);
             break;
         }
@@ -864,6 +957,8 @@ void replay(Replay& r, Enc* e) {
             const uint32_t x = std::min(op.u[0], r.width), y = std::min(op.u[1], r.height);
             const DkScissor s = {x, y, std::min(op.u[2], r.width - x), std::min(op.u[3], r.height - y)};
             dkCmdBufSetScissors(R.cmd, 0, &s, 1);
+            g_capScissor[0] = float(s.x), g_capScissor[1] = float(s.y), g_capScissor[2] = float(s.width),
+            g_capScissor[3] = float(s.height);
             break;
         }
         case OpType::BlendConstant: dkCmdBufSetBlendConst(R.cmd, op.f[0], op.f[1], op.f[2], op.f[3]); break;
@@ -1318,6 +1413,7 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
 bool cycle_blank_resolved() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeBlankResolved; }
 bool cycle_discard_rules() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeDiscardRules; }
 void count_discarded_sample() { g_discardSamples.fetch_add(1, std::memory_order_relaxed); }
+void capture_flush() { cap_flush(); }  // (dk_surface.cpp, at every present)
 
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "
@@ -1368,6 +1464,10 @@ WGPURenderPassEncoder __wrap_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncode
     if (!on()) return __real_wgpuCommandEncoderBeginRenderPass(e, d);
     Enc* enc = enc_of(e);
     PassDesc p;
+    if (d->label.data) {
+        const size_t n = d->label.length == WGPU_STRLEN ? strlen(d->label.data) : d->label.length;
+        snprintf(p.label, sizeof p.label, "%.*s", int(std::min<size_t>(n, sizeof p.label - 1)), d->label.data);
+    }
     p.colorCount = uint32_t(std::min<size_t>(d->colorAttachmentCount, 8));
     for (uint32_t i = 0; i < p.colorCount; i++) {
         const WGPURenderPassColorAttachment& a = d->colorAttachments[i];
