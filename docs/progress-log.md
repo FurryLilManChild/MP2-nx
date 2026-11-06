@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-06: first captures; whole-frame fix, per-draw snapshots
+
+- The owner's first captures (cap001-003 deko3d, cap004-007 Vulkan; deko3d first, the spots roughly matched).
+  Each held one picture only: the render worker submits passes as they are recorded, so the first
+  after_submit closed the capture after one pass (pass 1, mid-frame). The deko3d draws.txt shows 9 passes.
+- Even that one picture (EFB pass 1, 430 draws) shows the fault plainly, and not only the floor: on deko3d the
+  floor is flat light grey with no texture (Vulkan: dark hex tiles) and Samus is flat bright orange (Vulkan:
+  shaded and darker). It looks like lighting or a texture stage, not a stray see-through layer.
+- Fixes: a capture starts at a frame's pass 0 and closes at the next frame's first pass (mapped at the next
+  after_submit). On deko3d each draw into a full-size target is also shrunk by the 2D engine into a
+  256x144 cell of an atlas (32 x 16 cells), written as draws_atlas.pam, the cell number on the draw's line
+  ("snap N"), so the draw that paints the floor or Samus wrong can be read off directly.
+
 ## 2026-11-06: frame capture (left stick click)
 
 - deko-17 was never run (the owner paused two days). Instead of more hide-a-group cycles: a frame capture, like the

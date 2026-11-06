@@ -844,12 +844,96 @@ void cap_pass(const PassDesc& p) {
     g_capText += "\n";
 }
 
+// Snapshots: after every draw into a full-size target (the EFB), the 2D engine shrinks the target into a
+// 256x144 cell of an atlas (32 x 16 cells); at the end the atlas is written as draws_atlas.pam, the cell
+// number on each draw's line (snap N: column N % 32, row N / 32).
+constexpr uint32_t kSnapW = 256, kSnapH = 144, kSnapCols = 32, kSnapRows = 16;
+DkMemBlock g_snapMem = nullptr;
+DkImage g_snapImg;
+uint32_t g_snapUsed = 0;
+bool g_snapFailed = false;
+
+bool snap_init() {
+    if (g_snapMem) return true;
+    if (g_snapFailed) return false;
+    DkImageLayoutMaker m;
+    dkImageLayoutMakerDefaults(&m, R.device);
+    m.flags = DkImageFlags_Usage2DEngine;
+    m.format = DkImageFormat_RGBA8_Unorm;
+    m.dimensions[0] = kSnapW * kSnapCols;
+    m.dimensions[1] = kSnapH * kSnapRows;
+    DkImageLayout layout;
+    dkImageLayoutInitialize(&layout, &m);
+    const uint32_t align = std::max<uint32_t>(dkImageLayoutGetAlignment(&layout), DK_MEMBLOCK_ALIGNMENT);
+    const uint32_t size = (uint32_t(dkImageLayoutGetSize(&layout)) + align - 1) & ~(align - 1);
+    DkMemBlockMaker bm;
+    dkMemBlockMakerDefaults(&bm, R.device, size);
+    bm.flags = DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+    g_snapMem = dkMemBlockCreate(&bm);
+    if (!g_snapMem) {
+        g_snapFailed = true;
+        log("frame capture: no memory for the draw snapshots (%u KiB)", size >> 10);
+        return false;
+    }
+    dkImageInitialize(&g_snapImg, &layout, g_snapMem, 0);
+    return true;
+}
+
+int cap_snap(const Replay& r) {
+    if (!r.pass || r.pass->colorCount == 0) return -1;
+    const View* v = r.pass->colors[0].view;
+    if (!v || !v->tex || !v->tex->valid || v->tex->width < 640 || v->tex->depth) return -1;
+    if (g_snapUsed >= kSnapCols * kSnapRows || !snap_init()) return -1;
+    const uint32_t k = g_snapUsed++;
+    dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    const DkImageView sv = level_view(v->tex, v->baseMip);
+    DkImageView dv;
+    dkImageViewDefaults(&dv, &g_snapImg);
+    const DkImageRect srect = {0, 0, 0, v->tex->width, v->tex->height, 1};
+    const DkImageRect drect = {(k % kSnapCols) * kSnapW, (k / kSnapCols) * kSnapH, 0, kSnapW, kSnapH, 1};
+    dkCmdBufBlitImage(R.cmd, &sv, &srect, &dv, &drect, DkBlitFlag_FilterLinear, 0);
+    dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+    return int(k);
+}
+
+void snap_write(const std::string& dir) {
+    if (!g_snapUsed || !g_snapMem) return;
+    const uint32_t rows = (g_snapUsed + kSnapCols - 1) / kSnapCols;
+    const uint32_t w = kSnapW * kSnapCols, bandBytes = w * 4 * kSnapH;
+    static swdk::Block band;
+    if (!band) band = swdk::block_create_cached(bandBytes, "frame capture snapshots");
+    if (!band) return;
+    const std::string path = dir + "/draws_atlas.pam";
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return;
+    fprintf(f, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", w, rows * kSnapH);
+    DkImageView v;
+    dkImageViewDefaults(&v, &g_snapImg);
+    for (uint32_t b = 0; b < rows; b++) {
+        swdk::frame_open();
+        dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+        const DkImageRect rect = {0, b * kSnapH, 0, w, kSnapH, 1};
+        const DkCopyBuf buf = {band.gpu, w * 4, bandBytes};
+        dkCmdBufCopyImageToBuffer(R.cmd, &v, &rect, &buf, 0);
+        dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
+        swdk::submit("frame capture snapshots");
+        dkQueueWaitIdle(R.queue);
+        armDCacheFlush(band.cpu, bandBytes);
+        fwrite(band.cpu, 1, bandBytes, f);
+    }
+    fclose(f);
+    log("frame capture: %u draw snapshots in %s", g_snapUsed, path.c_str());
+    g_snapUsed = 0;
+}
+
 void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, bool indexed) {
     if (!cap_dir()) return;
     const RPipe* p = r.pipe;
     char line[1024];
+    const int snap = drawn ? cap_snap(r) : -1;
     int n = snprintf(line, sizeof line, "draw %u%s %s %u x%u", g_capDraw++, drawn ? "" : " (NOT DRAWN)",
                      indexed ? "indexed" : "verts", count, instances);
+    if (snap >= 0) n += snprintf(line + n, sizeof line - n, " | snap %d", snap);
     if (p) {
         const DkBlendState& b = p->blend[0];
         n += snprintf(line + n, sizeof line - n,
@@ -883,6 +967,7 @@ void cap_flush() {
         fclose(f);
         log("frame capture: %s", path.c_str());
     }
+    snap_write(g_capDir);
     g_capText.clear();
     g_capText.shrink_to_fit();
     g_capDir.clear();

@@ -126,7 +126,7 @@ index b1a0d8b9a..ab236243d 100644
  } // namespace aurora::device
 +#endif // !__SWITCH__
 diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
-index 28f8828b1..ef77ace09 100644
+index 28f8828b1..c1395fe70 100644
 --- a/lib/gfx/encoding.cpp
 +++ b/lib/gfx/encoding.cpp
 @@ -20,6 +20,9 @@
@@ -139,7 +139,7 @@ index 28f8828b1..ef77ace09 100644
  #include <array>
  #include <cstdint>
  #include <cstdlib>
-@@ -208,6 +211,222 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
+@@ -208,6 +211,228 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
  #endif
  }
  
@@ -160,6 +160,7 @@ index 28f8828b1..ef77ace09 100644
 +std::string g_requestDir;           // set by aurora_frame_capture_request, taken by the next pass
 +std::string g_dir;                  // the capture being recorded or saved ("" none)
 +bool g_recording = false;
++bool g_toMap = false;               // the capture's frame is over: its buffers map at the next after_submit
 +uint64_t g_frameId = 0;
 +std::vector<Item> g_items;
 +std::string g_text;
@@ -317,8 +318,15 @@ index 28f8828b1..ef77ace09 100644
 +
 +void on_pass(wgpu::CommandEncoder& cmd, const FramePacket& frame, const RenderPass& p, uint32_t passIndex) {
 +  std::lock_guard lock{g_mutex};
++  if (g_recording && frame.frameId != g_frameId) {
++    // the next frame's first pass: the capture is complete (its passes were all encoded before this one)
++    g_recording = false;
++    g_toMap = true;
++    return;
++  }
 +  if (!g_recording) {
-+    if (g_requestDir.empty() || !g_dir.empty()) {
++    // a capture starts at a frame's first pass (index 0), so it holds the whole frame
++    if (g_requestDir.empty() || !g_dir.empty() || g_toMap || passIndex != 0) {
 +      return;
 +    }
 +    g_dir = std::move(g_requestDir);
@@ -328,8 +336,6 @@ index 28f8828b1..ef77ace09 100644
 +    g_written = 0;
 +    g_text = fmt::format("frame capture of frame {} ({})\ncolour load: 1 load, 2 clear; store: 1 store, 2 discard\n\n",
 +                         frame.frameId, g_dir);
-+  } else if (frame.frameId != g_frameId) {
-+    return;
 +  }
 +  const auto& c = p.colorAttachments[SceneColorAttachmentIndex];
 +  size_t draws = 0;
@@ -362,7 +368,7 @@ index 28f8828b1..ef77ace09 100644
  void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
    ZoneScoped;
    if (!passInfo.sealed) {
-@@ -218,6 +437,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+@@ -218,6 +443,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
      tex_palette_conv::run(cmd, conv);
    }
    if (passInfo.discardable) {
@@ -370,7 +376,7 @@ index 28f8828b1..ef77ace09 100644
      // This pass has no effect and can be safely discarded (e.g. an empty EFB segment between two back-to-back pass
      // breaks, or an unresolved offscreen pass).
      if (passInfo.forceDepthSnapshot) {
-@@ -457,6 +677,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+@@ -457,6 +683,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
    if (passInfo.snapshotDepthDst) {
      tex_copy_conv::snapshot_depth(cmd, passInfo.copySourceDepthView, passInfo.msaaSamples, passInfo.snapshotDepthDst);
    }
@@ -378,7 +384,7 @@ index 28f8828b1..ef77ace09 100644
  }
  
  constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
-@@ -649,4 +870,60 @@ void bind_texture_group(BindGroupRef ref, const wgpu::RenderPassEncoder& pass) {
+@@ -649,4 +876,60 @@ void bind_texture_group(BindGroupRef ref, const wgpu::RenderPassEncoder& pass) {
  }
  
  void forget_texture_group() { g_currentTextureGroup = 0; }
@@ -388,10 +394,10 @@ index 28f8828b1..ef77ace09 100644
 +  std::vector<size_t> pending;
 +  {
 +    std::lock_guard lock{capture::g_mutex};
-+    if (!capture::g_recording) {
++    if (!capture::g_toMap) {
 +      return;
 +    }
-+    capture::g_recording = false;
++    capture::g_toMap = false;
 +    capture::g_pending = static_cast<uint32_t>(capture::g_items.size());
 +    if (capture::g_pending == 0) {
 +      capture::finish();
