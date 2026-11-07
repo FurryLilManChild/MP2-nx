@@ -70,6 +70,9 @@ struct Tex {
     // until written again); and whether it is a small 'Resolved Texture' (an EFB copy, -1 not yet known)
     std::atomic<bool> discarded{false};
     int8_t smallResolved = -1;
+    // mp2-nx (frame capture): XXH3 of the bytes the last whole upload of level 0 copied from (read by the CPU
+    // when the copy was recorded; 0 none), compared with the level as the GPU holds it in a capture
+    uint64_t uploadHash = 0;
     uint8_t blockW = 1, blockH = 1, blockBytes = 4;
     DkImage image{};
     swdk::ImageAlloc mem;

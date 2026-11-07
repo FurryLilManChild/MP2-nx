@@ -24,6 +24,7 @@
 #include <switch.h>
 
 #include <algorithm>
+#include <xxhash.h>
 #include <cstdio>
 #include <vector>
 #include <memory>
@@ -463,8 +464,19 @@ void copy_image(Replay& r, Tex* src, uint32_t srcMip, WGPUOrigin3D so, Tex* dst,
     g_totals.copies++;
 }
 
+// mp2-nx (frame capture): XXH3 of a level's tight rows (blocks x block bytes) at rowBytes apart
+uint64_t level_hash(const uint8_t* p, uint32_t rowBytes, const Tex* t, uint32_t w, uint32_t h) {
+    const uint32_t tight = (w + t->blockW - 1) / t->blockW * t->blockBytes, rows = (h + t->blockH - 1) / t->blockH;
+    XXH3_state_t* st = XXH3_createState();
+    XXH3_64bits_reset(st);
+    for (uint32_t y = 0; y < rows; y++) XXH3_64bits_update(st, p + size_t(y) * rowBytes, tight);
+    const uint64_t hash = XXH3_64bits_digest(st);
+    XXH3_freeState(st);
+    return hash ? hash : 1;
+}
+
 void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows, Tex* t, uint32_t mip, WGPUOrigin3D o,
-                     WGPUExtent3D e) {
+                     WGPUExtent3D e, const uint8_t* cpu = nullptr) {
     if (!t || !t->valid || mip >= t->mips) {
         dropped_copy("an upload (an invalid texture or level)", t, mip, o, e);
         return;
@@ -477,6 +489,8 @@ void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows,
     const uint32_t w = std::min(e.width, lw - o.x), h = std::min(e.height, lh - o.y);
     if (w == 0 || h == 0) return;
     t->discarded = false;
+    if (mip == 0 && o.x == 0 && o.y == 0 && o.z == 0 && w == lw && h == lh && t->layers == 1 && !t->is3d)
+        t->uploadHash = cpu && src != g_zero.gpu ? level_hash(cpu, rowBytes, t, w, h) : 0;
     if (src != g_zero.gpu) {
         t->written = true;
         if (mip < 32) t->mipsWritten.fetch_or(1u << mip, std::memory_order_relaxed);
@@ -821,6 +835,9 @@ struct Dump {
     const Tex* tex;
     uint32_t id, w, h, rowBytes, rows, offset;
     unsigned fmt;
+    uint64_t expect;  // the texture's uploadHash when dumped (level 0 only; 0 unknown)
+    std::string label;
+    uint32_t slot;
 };
 std::vector<Dump> g_dumps;
 uint32_t g_dumpUsed = 0;
@@ -966,7 +983,8 @@ int cap_dump(const View* v) {
     const uint32_t rowBytes = (w + t->blockW - 1) / t->blockW * t->blockBytes, rows = (h + t->blockH - 1) / t->blockH;
     const uint32_t size = (rowBytes * rows + 255) & ~255u;
     if (g_dumpUsed + size > kDumpBytes) return -1;
-    Dump d{t, uint32_t(g_dumps.size()), w, h, rowBytes, rows, g_dumpUsed, unsigned(t->wformat)};
+    Dump d{t, uint32_t(g_dumps.size()), w, h, rowBytes, rows, g_dumpUsed, unsigned(t->wformat),
+           mip == 0 ? t->uploadHash : 0, t->label, v->slot};
     g_dumpUsed += size;
     const DkImageView iv = level_view(const_cast<Tex*>(t), mip);
     const DkImageRect rect = {0, 0, 0, w, h, 1};
@@ -980,7 +998,20 @@ void dumps_write(const std::string& dir) {
     if (g_dumps.empty() || !g_dumpBuf) return;
     dkQueueWaitIdle(R.queue);
     armDCacheFlush(g_dumpBuf.cpu, g_dumpUsed);
+    std::string list = "textures sampled in the capture: id, label, size, WGPU format, slot, then whether level 0 as the GPU\n"
+                       "holds it matches the bytes its upload copied from (match / DIFFERENT / unknown: not uploaded whole)\n\n";
+    uint32_t different = 0;
     for (const Dump& d : g_dumps) {
+        const char* verdict = "unknown";
+        if (d.expect) {
+            const uint64_t got = level_hash(g_dumpBuf.cpu + d.offset, d.rowBytes, d.tex, d.w, d.h);
+            verdict = got == d.expect ? "match" : "DIFFERENT";
+            different += got != d.expect;
+        }
+        char line[256];
+        snprintf(line, sizeof line, "#%03u '%s' %ux%u fmt 0x%X slot %u %s\n", d.id, d.label.c_str(), d.w, d.h, d.fmt,
+                 d.slot, verdict);
+        list += line;
         char path[256];
         snprintf(path, sizeof path, "%s/tex%03u_%ux%u_fmt%02X.raw", dir.c_str(), d.id, d.w, d.h, d.fmt);
         if (FILE* f = fopen(path, "wb")) {
@@ -988,7 +1019,12 @@ void dumps_write(const std::string& dir) {
             fclose(f);
         }
     }
-    log("frame capture: %zu textures dumped (%u KiB)", g_dumps.size(), g_dumpUsed >> 10);
+    if (FILE* f = fopen((dir + "/textures.txt").c_str(), "wb")) {
+        fwrite(list.data(), 1, list.size(), f);
+        fclose(f);
+    }
+    log("frame capture: %zu textures dumped (%u KiB), %u differ from their uploads", g_dumps.size(), g_dumpUsed >> 10,
+        different);
     g_dumps.clear();
     g_dumpUsed = 0;
 }
@@ -1145,7 +1181,7 @@ void replay(Replay& r, Enc* e) {
             const CopyDesc& c = e->copies[op.u[0]];
             if (!c.buf || !c.buf->mem) break;
             buffer_to_image(r, c.buf->mem.gpu + c.offset, c.bytesPerRow, c.rowsPerImage ? c.rowsPerImage : c.extent.height,
-                            c.tex, c.mip, c.origin, c.extent);
+                            c.tex, c.mip, c.origin, c.extent, c.buf->mem.cpu ? c.buf->mem.cpu + c.offset : nullptr);
             mark(c.buf, r);
             break;
         }
@@ -1252,7 +1288,10 @@ void replay_queue_ops(Replay& r) {
             zero_texture(r, q.tex);
             tex_release(q.tex);
         } else if (q.texture) {
-            buffer_to_image(r, q.src, q.rowBytes, q.rows, q.tex, q.mip, q.origin, q.extent);
+            const uint8_t* cpu = q.own ? q.own.cpu
+                                 : (q.src >= g_ring.gpu && q.src < g_ring.gpu + kRingSize) ? g_ring.cpu + (q.src - g_ring.gpu)
+                                                                                         : nullptr;
+            buffer_to_image(r, q.src, q.rowBytes, q.rows, q.tex, q.mip, q.origin, q.extent, cpu);
             tex_release(q.tex);
         } else {
             if (q.buf && q.buf->mem && q.dstOffset + q.size <= q.buf->size) {

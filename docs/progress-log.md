@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-06: 20 more captures (cap009-028); upload hashes
+
+- cap009-019 deko3d against cap020-028 Vulkan of the same spots (one bad boot): shot decals as white squares
+  (009-012), whole rooms washed bright (013-015), strips solid white (016, 017), white grids and a white door
+  (018, 019). Vulkan is dark and textured in every one. Everything wrong reads as a texture coming back white or
+  far too bright, and which textures do so differs from boot to boot: the data, not a shader rule.
+- Two possible classes: (a) a texture's contents are wrong on the GPU (staging overwritten before the copy,
+  image memory reused, a copy landing in the wrong texture), or (b) the draw reads the wrong texture (descriptor
+  slot or object mix-up). The older captures cannot tell these apart.
+- Capture build now hashes (XXH3) each whole level-0 upload's source bytes when the copy is recorded (staging
+  buffer or upload ring), and in a capture compares that with level 0 as the GPU holds it: textures.txt lists
+  every sampled texture with its slot and match / DIFFERENT. DIFFERENT = class (a); all match = class (b).
+
 ## 2026-11-06: first useful captures (door, strips); texture dumps next
 
 - cap001-003 deko3d (bad boot), cap004-008 Vulkan. Frames now whole: pass 0 'EFB' (4-5 draws, the 51x51
