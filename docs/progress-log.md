@@ -2,6 +2,28 @@
 
 Newest first.
 
+## 2026-11-07: the boot-time build (boost from launch, boot helper threads, a boot screen)
+
+- The owner asked to shorten the black screen before the game. The fix build's log: "pipeline cache: 1886 pipelines
+  ready 10044 ms after startup" on 1 compile thread, 5697 of the first 1000 pipelines' 5844 ms "shader source and
+  parse" (WGSL generation plus Dawn's CreateShaderModule); the load boost first switched on at CMFGameLoader,
+  after that. The game thread does not wait for the pipelines: its lines interleave with the warm-up's, and the
+  first present comes after the disc (an .rvz) is opened and checked, so the disc open may be much of the wait.
+  The log has no times to tell, so this build adds them.
+- (1) load_boost.cpp reason 3 (startup): FastLoad from userAppInit to the Switch menu's first frame; not a
+  compile-boost reason, so the compile thread stays off core 0 while the game thread opens the disc.
+- (2) Aurora's pipeline cache, deko3d only: two more compile threads (cores 1 and 0, low priority) while the
+  stored pipelines build at startup; they stop at "pipelines ready" or at the menu's first frame.
+  MP2_BOOT_COMPILE_THREADS=1..3 (default 3). Vulkan keeps one. apply_compile_boost's state is per thread now.
+  The summary lines split out Dawn's CreateShaderModule time: with ImplicitDeviceSynchronization, Dawn calls run
+  one at a time, so that part may not gain from more threads; the log will say.
+- (3) dk_surface.cpp: a boot screen thread from the swapchain's creation to Aurora's first GetCurrentTexture
+  (CPU-drawn 5x7 text and a bar, copied into a swapchain image about 15 times a second, each frame acquired and
+  presented in one hold of the submit lock). MP2DK_BOOT_SCREEN=0 turns it off. The boot marker still clears
+  only at the game's own first present.
+- "[boot] <step> at N ms" lines: userAppInit, aurora_initialize, textures, the disc open and check, the game's
+  start, the boot screen, the game's first frame, the menu's first frame; the load boost lines carry the time.
+
 ## 2026-11-06: fix confirmed; GPU times in the capture, two safety fixes
 
 - The owner: everything looks right on the fix build. Its log has 26 "a new view of 'Resolved Texture' 51x51 came back

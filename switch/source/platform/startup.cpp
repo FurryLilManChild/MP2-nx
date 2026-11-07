@@ -22,6 +22,8 @@
 // SQLite for the pipeline and Dawn caches on Horizon (sqlite_switch.cpp).
 extern "C" void mp2nx_sqlite_setup(void);
 extern "C" void mp2nx_install_suspend_hook(void);
+extern "C" void mp2nx_load_boost(int reason, int on);                 // load_boost.cpp
+extern "C" void mp2nx_boot_mark(const char* what, const char* stage);  // load_boost.cpp
 
 extern "C" {
 
@@ -139,6 +141,7 @@ extern "C" void userAppInit(void) {
   setenv("NVK_I_WANT_A_BROKEN_VULKAN_DRIVER", "1", 1);
   nvInitialize();  // the GPU service the Vulkan driver talks to
   open_logs();
+  mp2nx_boot_mark("userAppInit (the logs are open)", nullptr);
 
   const AppletType type = appletGetAppletType();
   u64 total = 0;
@@ -152,6 +155,10 @@ extern "C" void userAppInit(void) {
         "  from the HOME menu, then pick " MP2NX_APP_NAME ". Not from the Album.");
   }
 
+  // mp2-nx (the boot-time build): the CPU at 1785 MHz from here to the Switch menu's first frame
+  // (load_boost.cpp reason 3). The log of 2026-11-06 had the pipeline warm-up at stock 1020 MHz: the
+  // boost only started at CMFGameLoader, after 10 s of black screen.
+  mp2nx_load_boost(3, 1);
   mp2nx_sqlite_setup();
   mp2nx_install_suspend_hook(); // misc_switch.cpp
   // Not SDL_AUDIO_DEVICE_SAMPLE_FRAMES=4096 (Dusklight's crackle fix): Echoes keeps only 64 ms

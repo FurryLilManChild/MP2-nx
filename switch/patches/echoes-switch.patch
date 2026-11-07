@@ -187,10 +187,21 @@ index cc7e6a6b8..02bb72c8c 100644
      const uint64_t searchNow = SDL_GetTicksNS();
      if (sPhoneGyro == nullptr && searchNow >= sPhoneNextSearchNs) {
 diff --git a/platform/main.cpp b/platform/main.cpp
-index a3d106a14..1a7fddffd 100644
+index a3d106a14..5c63494ac 100644
 --- a/platform/main.cpp
 +++ b/platform/main.cpp
-@@ -1270,9 +1270,18 @@ int main(int argc, char** argv) {
+@@ -71,6 +71,10 @@ extern "C" __declspec(dllimport) unsigned int __stdcall SetErrorMode(unsigned in
+ 
+ #include "Kyoto/Alloc/CMemorySys.hpp"
+ 
++#if defined(__SWITCH__)
++// mp2-nx switch/source/platform/load_boost.cpp: a "[boot]" log line and the boot screen's top line.
++extern "C" void mp2nx_boot_mark(const char* what, const char* stage);
++#endif
+ extern "C" void* OSGetArenaLo();
+ extern "C" void* OSGetArenaHi();
+ extern void* gPortGameHeapLo;
+@@ -1270,9 +1274,18 @@ int main(int argc, char** argv) {
    // what a minute of frames didn't draw, under 512 MiB all but what the last frames drew (GLOBAL
    // pipelines stay). Overrides: MP2_PIPELINE_TRIM_MIB / MP2_PIPELINE_TRIM_SEVERE_MIB (0 turns a
    // level off), MP2_PIPELINE_EVICT=<frames> (a fixed idle sweep at every frame start, any mode).
@@ -209,6 +220,55 @@ index a3d106a14..1a7fddffd 100644
      PortMemoryLog::SetPipelinePressure(trimMib, severeMib);
      if (std::getenv("MP2_PIPELINE_TRIM_MIB") != nullptr ||
          std::getenv("MP2_PIPELINE_TRIM_SEVERE_MIB") != nullptr) {
+@@ -1322,7 +1335,13 @@ int main(int argc, char** argv) {
+   // F1 > Video > Compatibility (PortVideo, f1b): OpenGL ES, the storage clamp, the low-power
+   // adapter and the driver workarounds' Dawn toggles, all read when the GPU device is made.
+   PortVideo::BeginGpuStart(config.userPath != nullptr ? config.userPath : "", config);
++#if defined(__SWITCH__)
++  mp2nx_boot_mark("aurora_initialize starts", "Starting the renderer");
++#endif
+   aurora_initialize(argc, argv, &config);
++#if defined(__SWITCH__)
++  mp2nx_boot_mark("aurora_initialize done", "Loading textures");
++#endif
+   // The settings file, JSON and the logs read and write numbers in the "C" format. A toolkit loaded
+   // with the window (a GTK decoration plugin, an input method) may call setlocale(LC_ALL, ""), and
+   // under a comma-decimal locale "1.5" would then read as 1 (MP1's main.cpp:1304).
+@@ -1386,6 +1405,9 @@ int main(int argc, char** argv) {
+     PortPrompts::Initialize(textures.empty() ? nullptr : textures.c_str());
+   }
+ 
++#if defined(__SWITCH__)
++  mp2nx_boot_mark("textures and prompts done", "Opening the disc");
++#endif
+   std::string discImage =
+ #if defined(__ANDROID__)
+       // Resolved and, if need be, picked from the user's storage before Aurora started.
+@@ -1432,7 +1454,14 @@ int main(int argc, char** argv) {
+   }
+   for (;;) {
+     std::string problem;
++#if defined(__SWITCH__)
++    mp2nx_boot_mark("disc open starts", nullptr);
++    const bool discOpened = aurora_dvd_open(discImage.c_str());
++    mp2nx_boot_mark("disc open done", "Checking the disc");
++    if (!discOpened) {
++#else
+     if (!aurora_dvd_open(discImage.c_str())) {
++#endif
+       std::fprintf(stderr, "metroid_prime2_port: failed to open disc image: %s\n", discImage.c_str());
+       problem = "This file could not be read as a GameCube disc image.";
+     } else if (const DVDDiskID* discId = DVDGetCurrentDiskID();
+@@ -1519,6 +1548,9 @@ int main(int argc, char** argv) {
+ 
+   // Prime the window and event state so the game's first frame can succeed: the
+   // console build submits GX during early initialization, before its main loop.
++#if defined(__SWITCH__)
++  mp2nx_boot_mark("the disc is mounted; the game starts", "Starting the game");
++#endif
+   aurora_update();
+ 
+   // The game's entry owns the OS context and memory system. It returns void, so
 diff --git a/platform/port_harness.cpp b/platform/port_harness.cpp
 index 502c3304b..ea42482d8 100644
 --- a/platform/port_harness.cpp

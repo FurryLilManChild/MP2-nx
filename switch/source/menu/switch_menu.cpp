@@ -43,6 +43,8 @@ extern "C" unsigned aurora_frame_capture_done(char* lastDir, unsigned size);
 // switch/source/deko/dk_smoke.cpp: the deko3d phase 0 smoke test
 // switch/deko/dk_surface.cpp: the renderer of this start and the choice for the next
 extern "C" bool mp2nx_dk_active(void);
+extern "C" void mp2nx_boot_mark(const char* what, const char* stage);  // load_boost.cpp
+extern "C" void aurora_pipeline_boot_helpers_off(void);               // Aurora's pipeline_cache.cpp
 extern "C" bool mp2nx_dk_fell_back(void);
 extern "C" bool mp2nx_dk_chosen(void);
 extern "C" void mp2nx_dk_set_chosen(bool on);
@@ -827,6 +829,11 @@ void DrawAlways() {
   if (!sConfigLoaded) {
     LoadConfig();
     mp2nx_load_boost(0, 1); // load_boost.cpp: the title's startup warmup (cleared by CMFGameLoader)
+    // mp2-nx (the boot-time build): the startup boost (FastLoad, set in startup.cpp) ends with the black
+    // screen: FastLoad slows the GPU, and the title screen draws from here on
+    mp2nx_load_boost(3, 0);
+    aurora_pipeline_boot_helpers_off();
+    mp2nx_boot_mark("the Switch menu's first frame", nullptr);
     // The owner: remapping a gameplay button must not move the game's menu buttons (A confirms, B backs
     // out). Echoes has this as "Separate menu buttons" (port_input_devices.cpp ApplyMenuButtons),
     // off by default; on the Switch it starts on, once, so a later choice in the menu is kept.

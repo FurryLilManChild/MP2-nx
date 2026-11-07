@@ -485,7 +485,7 @@ index de8c3f93c..f02a1d834 100644
  const wgpu::Buffer& staging_buffer(size_t slot);
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index dfbba6023..652379bd4 100644
+index dfbba6023..24bd50ce7 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
@@ -494,7 +494,15 @@ index dfbba6023..652379bd4 100644
  
  #include "clear.hpp"
  #include "fx_pipelines.hpp"
-@@ -28,10 +29,14 @@
+@@ -19,6 +20,7 @@
+ #include <chrono>
+ #include <cstdint>
+ #include <cstdlib>
++#include <cstdio>
+ #include <deque>
+ #include <filesystem>
+ #include <limits>
+@@ -28,10 +30,16 @@
  #include <type_traits>
  #include <vector>
  
@@ -505,11 +513,13 @@ index dfbba6023..652379bd4 100644
  #endif
 +#ifdef __SWITCH__
 +#include <switch.h>
++// mp2-nx switch/deko/dk_surface.cpp: this start renders with deko3d (the boot helper threads)
++extern "C" bool mp2nx_dk_active(void);
 +#endif
  #include <absl/container/flat_hash_map.h>
  #include <absl/container/flat_hash_set.h>
  #include <fmt/format.h>
-@@ -85,6 +90,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
+@@ -85,6 +93,10 @@ constexpr size_t BuildPipelinesPerFrame = 5;
  constexpr size_t BuildPipelinesPerFrame = 1;
  #endif
  static std::vector<std::thread> g_pipelineThreads;
@@ -520,16 +530,31 @@ index dfbba6023..652379bd4 100644
  static std::atomic_bool g_pipelineThreadEnd = false;
  static std::condition_variable g_pipelineQueueCv;
  static std::condition_variable g_pipelineReadyCv;
-@@ -479,10 +488,35 @@ static std::atomic<uint64_t> g_compileSlowestMs = 0;
+@@ -95,6 +107,10 @@ static std::deque<PendingPipeline> g_backgroundPipelineQueue;
+ static bool g_backgroundPipelinesPaused = false;
+ static absl::flat_hash_set<PipelineRef> g_pendingPipelines;
+ static std::atomic_bool g_gpuCachePrunePending = false;
++// mp2-nx (the boot-time build): the boot helpers' switch (pipeline_worker) and the boot screen's count
++static std::atomic<bool> g_bootHelpers{false};
++static std::atomic<uint32_t> g_bootTotal{0};
++static size_t g_compileThreads = 1;
+ static std::chrono::steady_clock::time_point g_pipelineLoadStart;
+ 
+ static sqlite3* g_pipelineCacheDb = nullptr;
+@@ -479,10 +495,46 @@ static std::atomic<uint64_t> g_compileSlowestMs = 0;
  static std::atomic<uint64_t> g_compileFailures = 0;
  constexpr int64_t kSlowPipelineMs = 200;
  
 +} // namespace aurora::gfx
 +namespace aurora::gx {
 +extern thread_local uint64_t g_buildShaderNs; // shader.cpp
++extern thread_local uint64_t g_dawnShaderNs;  // shader.cpp (mp2-nx: of it, Dawn's CreateShaderModule)
 +}
 +namespace aurora::gfx {
 +static std::atomic<uint64_t> g_compileShaderMs{0};
++static std::atomic<uint64_t> g_compileDawnMs{0};
++static std::atomic<uint64_t> g_compileDawnNs{0};
++static std::atomic<uint64_t> g_compileShaderNs{0};
 +
 +#if defined(__SWITCH__)
 +extern "C" uint32_t mp2nx_switch_suspend_epoch(void);
@@ -541,6 +566,7 @@ index dfbba6023..652379bd4 100644
 +#endif
    const auto start = std::chrono::steady_clock::now();
 +  gx::g_buildShaderNs = 0;
++  gx::g_dawnShaderNs = 0;
    wgpu::RenderPipeline pipeline = create();
    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
 +  const uint64_t shaderMs = gx::g_buildShaderNs / 1000000ull;
@@ -552,11 +578,17 @@ index dfbba6023..652379bd4 100644
 +    return pipeline;
 +  }
 +#endif
-+  g_compileShaderMs.fetch_add(shaderMs, std::memory_order_relaxed);
++  // (summed in ns: per-pipeline milliseconds rounded most of it away)
++  g_compileShaderMs.store((g_compileShaderNs.fetch_add(gx::g_buildShaderNs, std::memory_order_relaxed) +
++                           gx::g_buildShaderNs) / 1000000ull,
++                          std::memory_order_relaxed);
++  g_compileDawnMs.store((g_compileDawnNs.fetch_add(gx::g_dawnShaderNs, std::memory_order_relaxed) +
++                         gx::g_dawnShaderNs) / 1000000ull,
++                        std::memory_order_relaxed);
    const uint64_t count = g_compileCount.fetch_add(1, std::memory_order_relaxed) + 1;
    g_compileTotalMs.fetch_add(static_cast<uint64_t>(ms.count()), std::memory_order_relaxed);
    uint64_t slowest = g_compileSlowestMs.load(std::memory_order_relaxed);
-@@ -494,12 +528,13 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
+@@ -494,12 +546,15 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
      g_compileFailures.fetch_add(1, std::memory_order_relaxed);
      Log.error("pipeline: creation failed (hash {:016x})", hash);
    } else if (ms.count() > kSlowPipelineMs) {
@@ -568,15 +600,31 @@ index dfbba6023..652379bd4 100644
 -    Log.info("pipelines: {} compiled, total {} ms, slowest {} ms, {} failed", count,
 -             g_compileTotalMs.load(std::memory_order_relaxed), g_compileSlowestMs.load(std::memory_order_relaxed),
 -             g_compileFailures.load(std::memory_order_relaxed));
-+    Log.info("pipelines: {} compiled, total {} ms ({} ms shader source and parse), slowest {} ms, {} failed", count,
-+             g_compileTotalMs.load(std::memory_order_relaxed), g_compileShaderMs.load(std::memory_order_relaxed),
++    Log.info("pipelines: {} compiled, total {} ms ({} ms shader source and parse, {} ms of it in Dawn), slowest {} "
++             "ms, {} failed",
++             count, g_compileTotalMs.load(std::memory_order_relaxed), g_compileShaderMs.load(std::memory_order_relaxed),
++             g_compileDawnMs.load(std::memory_order_relaxed),
 +             g_compileSlowestMs.load(std::memory_order_relaxed), g_compileFailures.load(std::memory_order_relaxed));
    }
    return pipeline;
  }
-@@ -512,7 +547,12 @@ static void notify_pipeline_ready(bool queued) {
+@@ -507,12 +562,24 @@ static wgpu::RenderPipeline create_pipeline_timed(PipelineRef hash, NewPipelineC
+ static void notify_pipeline_ready(bool queued) {
+   ++createdPipelines;
+   if (queued && --queuedPipelines == 0 && g_gpuCachePrunePending.exchange(false, std::memory_order_acq_rel)) {
+-    Log.info("pipeline cache: {} pipelines ready {} ms after startup", static_cast<uint32_t>(createdPipelines),
++    Log.info("pipeline cache: {} pipelines ready {} ms after startup ({} compile thread(s); {} ms shader source "
++             "and parse, of it {} ms in Dawn's CreateShaderModule)",
++             static_cast<uint32_t>(createdPipelines),
+              std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
                                                                     g_pipelineLoadStart)
-                  .count());
+-                 .count());
++                 .count(),
++             g_bootHelpers.load() ? g_compileThreads : size_t{1}, g_compileShaderMs.load(std::memory_order_relaxed),
++             g_compileDawnMs.load(std::memory_order_relaxed));
++    if (g_bootHelpers.exchange(false)) {
++      Log.info("pipeline cache: the boot helper threads stop; one compile thread from here");
++    }
      // Prune GPU cache entries after fully loading the pipeline cache.
 +#if !defined(__SWITCH__)
 +    // mp2-nx (after aurora-aleks pipeline_cache.cpp:1736): never on the Switch, where the prune
@@ -587,7 +635,7 @@ index dfbba6023..652379bd4 100644
    }
    g_pipelineReadyCv.notify_all();
  }
-@@ -772,6 +812,7 @@ static void pipeline_cache_abort() {
+@@ -772,6 +839,7 @@ static void pipeline_cache_abort() {
    if (g_pipelineCacheDb != nullptr) {
      sqlite3_close(g_pipelineCacheDb);
      g_pipelineCacheDb = nullptr;
@@ -595,7 +643,7 @@ index dfbba6023..652379bd4 100644
    }
    if (g_pipelineCacheCorrupt.exchange(false)) {
      Log.warn("Pipeline cache is damaged; deleting it");
-@@ -839,6 +880,28 @@ static void seed_pipeline_cache() {
+@@ -839,6 +907,28 @@ static void seed_pipeline_cache() {
    }
  
    const auto seedPath = pipeline_cache_seed_path();
@@ -624,7 +672,7 @@ index dfbba6023..652379bd4 100644
    sqlite3* seedDb = open_pipeline_cache_seed_db(seedPath);
    if (seedDb == nullptr) {
      return;
-@@ -952,6 +1015,12 @@ static void seed_pipeline_cache() {
+@@ -952,6 +1042,12 @@ static void seed_pipeline_cache() {
    if (!readFailed) {
      Log.info("Seeded pipeline cache from '{}' ({} rows merged, {} rows skipped, {} uses)", seedPath, mergedRows,
               skippedRows, mergedUses);
@@ -637,7 +685,7 @@ index dfbba6023..652379bd4 100644
    }
  }
  
-@@ -971,7 +1040,7 @@ static bool prepare_pipeline_cache_db() {
+@@ -971,7 +1067,7 @@ static bool prepare_pipeline_cache_db() {
      return false;
    }
  
@@ -646,10 +694,11 @@ index dfbba6023..652379bd4 100644
    if (ret != SQLITE_OK) {
      Log.error("Failed to set pipeline cache pragmas: {}", sqlite3_errmsg(g_pipelineCacheDb));
      pipeline_cache_abort();
-@@ -1306,6 +1375,40 @@ static void pipeline_cache_writer() {
+@@ -1306,7 +1402,44 @@ static void pipeline_cache_writer() {
    }
  }
  
+-static void pipeline_worker() {
 +// mp2-nx (from aurora-aleks pipeline_cache.cpp:1099, V1-rc9): while a loading screen waits (the game
 +// thread mostly idle), the compile thread may also run on core 0 at the game's priority; otherwise
 +// it stays on its own core at low priority. Alek's console numbers: 70-136 ms per cached pipeline
@@ -657,10 +706,13 @@ index dfbba6023..652379bd4 100644
 +// applies a change itself, before its next pipeline.
 +static std::atomic<uint32_t> g_compileBoost{0};
 +static std::atomic<bool> g_compileBacklog{false};
++// mp2-nx (the boot-time build): extra compile threads on cores 0 and 1 while the stored pipelines are
++// built at startup (deko3d only), see initialize_pipeline_cache. Declared above notify_pipeline_ready.
 +static void apply_compile_boost() {
 +#ifdef __SWITCH__
-+  static uint32_t applied = 0;
-+  static s32 savedPriority = -1;
++  // (per thread: only the first worker calls it, but its state is its own)
++  static thread_local uint32_t applied = 0;
++  static thread_local s32 savedPriority = -1;
 +  const uint32_t want =
 +      (g_compileBoost.load(std::memory_order_relaxed) != 0 || g_compileBacklog.load(std::memory_order_relaxed)) ? 1u : 0u;
 +  if (want == applied) {
@@ -684,10 +736,30 @@ index dfbba6023..652379bd4 100644
 +#endif
 +}
 +
- static void pipeline_worker() {
++static void pipeline_worker(size_t index) {
  #ifdef TRACY_ENABLE
    tracy::SetThreadName("Pipeline compilation thread");
-@@ -1327,10 +1430,23 @@ static void pipeline_worker() {
+ #endif
+@@ -1317,9 +1450,15 @@ static void pipeline_worker() {
+       std::unique_lock lock{g_pipelineMutex};
+       if (g_hasPipelineThread) {
+         // Several workers share the queues, so check them again under the lock every time.
+-        g_pipelineQueueCv.wait(lock, [] {
+-          return !g_pipelineQueue.empty() || (!g_backgroundPipelinesPaused && !g_backgroundPipelineQueue.empty()) ||
+-                 g_pipelineThreadEnd;
++        // mp2-nx: the Switch's boot helpers (index > 0) only take work while g_bootHelpers is set.
++        g_pipelineQueueCv.wait(lock, [index] {
++          if (g_pipelineThreadEnd) {
++            return true;
++          }
++          if (index > 0 && !g_bootHelpers.load(std::memory_order_relaxed)) {
++            return false;
++          }
++          return !g_pipelineQueue.empty() || (!g_backgroundPipelinesPaused && !g_backgroundPipelineQueue.empty());
+         });
+       } else if (g_pipelineQueue.empty() && (g_backgroundPipelinesPaused || g_backgroundPipelineQueue.empty())) {
+         return;
+@@ -1327,10 +1466,23 @@ static void pipeline_worker() {
        if (g_pipelineThreadEnd) {
          break;
        }
@@ -705,26 +777,45 @@ index dfbba6023..652379bd4 100644
        pending = std::move(source.front());
        source.pop_front();
      }
-+    if (g_hasPipelineThread) {
++    if (g_hasPipelineThread && index == 0) {
 +      apply_compile_boost();
 +    }
      auto result = create_pipeline_timed(pending.hash, std::move(pending.create));
      {
        std::lock_guard lock{g_pipelineMutex};
-@@ -1724,10 +1840,29 @@ void initialize_pipeline_cache() {
+@@ -1724,10 +1876,48 @@ void initialize_pipeline_cache() {
      g_hasPipelineThread = false;
    } else {
      g_hasPipelineThread = true;
 +#ifdef __SWITCH__
 +    // mp2-nx: one compile thread on its own core, eight MiB of stack (as Alek's Switch layer).
-+    const size_t threads = 1;
++    // The boot-time build: with deko3d, two more (cores 1 and 0, low priority) help with the stored
++    // pipelines at startup only, while the game thread waits on the disc and the FIFO thread has no
++    // frames yet; they stop when that list is built (notify_pipeline_ready) or at the Switch menu's
++    // first frame (aurora_pipeline_boot_helpers_off), whichever is first. MP2_BOOT_COMPILE_THREADS
++    // (1-3, default 3) sets the count. Vulkan keeps one: Dawn's Vulkan device was never run with
++    // several compile threads on the Switch.
++    size_t threads = 1;
++    if (mp2nx_dk_active()) {
++      threads = 3;
++      if (const char* env = std::getenv("MP2_BOOT_COMPILE_THREADS"); env != nullptr && *env != '\0') {
++        threads = std::clamp<size_t>(std::strtoul(env, nullptr, 10), 1, 3);
++      }
++    }
++    g_compileThreads = threads;
++    g_bootHelpers.store(threads > 1, std::memory_order_relaxed);
 +    for (size_t i = 0; i < threads; ++i) {
 +      auto worker = std::make_unique<thread::LargeStackThread>();
-+      if (!worker->start(8u * 1024u * 1024u, [] {
++      if (!worker->start(8u * 1024u * 1024u, [i] {
 +            thread::set_current(thread::Options{.name = "Pipeline compilation",
 +                                                .priority = thread::Priority::Low,
 +                                                .affinity = thread::Affinity::Compile});
-+            pipeline_worker();
++            if (i > 0) {
++              // a helper: core 1 (the FIFO core, idle before the first frame), then core 0
++              const s32 core = i == 1 ? 1 : 0;
++              ::svcSetThreadCoreMask(::threadGetCurHandle(), core, 1u << core);
++            }
++            pipeline_worker(i);
 +          })) {
 +        Log.error("pipeline cache: compile thread creation failed; compiling synchronously");
 +        g_hasPipelineThread = false;
@@ -735,13 +826,26 @@ index dfbba6023..652379bd4 100644
 +#else
      const size_t threads = pipeline_thread_count();
      for (size_t i = 0; i < threads; ++i) {
-       g_pipelineThreads.emplace_back(pipeline_worker);
+-      g_pipelineThreads.emplace_back(pipeline_worker);
++      g_pipelineThreads.emplace_back(pipeline_worker, i);
      }
 +#endif
      Log.info("pipeline cache: {} compile thread(s)", threads);
    }
  
-@@ -1750,6 +1885,12 @@ void shutdown_pipeline_cache() {
+@@ -1735,6 +1925,11 @@ void initialize_pipeline_cache() {
+   if (!g_pipelineCacheBroken && loadedCount > 0) {
+     g_gpuCachePrunePending = true;
+   }
++  g_bootTotal.store(static_cast<uint32_t>(createdPipelines) + static_cast<uint32_t>(queuedPipelines),
++                    std::memory_order_relaxed);
++  if (g_bootHelpers.load() && (g_pipelineCacheBroken || loadedCount == 0)) {
++    g_bootHelpers.store(false);
++  }
+ 
+   if (!g_pipelineCacheBroken) {
+     start_pipeline_cache_writer();
+@@ -1750,6 +1945,12 @@ void shutdown_pipeline_cache() {
        thread.join();
      }
      g_pipelineThreads.clear();
@@ -754,16 +858,46 @@ index dfbba6023..652379bd4 100644
    }
    g_hasPipelineThread = false;
  
-@@ -1943,3 +2084,9 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+@@ -1858,7 +2059,7 @@ void begin_pipeline_frame() {
+ 
+ void end_pipeline_frame() {
+   if (!g_hasPipelineThread) {
+-    pipeline_worker();
++    pipeline_worker(0);
+   }
+ }
+ 
+@@ -1942,4 +2143,30 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+   stats->known = static_cast<uint32_t>(g_knownPipelines.size());
    stats->pending = static_cast<uint32_t>(g_pendingPipelines.size());
  }
- }
++
++// mp2-nx (the boot-time build): the deko3d boot screen's count of the stored pipelines built at startup
++void aurora_pipeline_boot_progress(uint32_t* done, uint32_t* total) {
++  const uint32_t t = aurora::gfx::g_bootTotal.load(std::memory_order_relaxed);
++  const uint32_t q = __atomic_load_n(&aurora::gfx::detail::resources().stats.queuedPipelines, __ATOMIC_RELAXED);
++  if (total != nullptr) {
++    *total = t;
++  }
++  if (done != nullptr) {
++    *done = q >= t ? 0u : t - q;
++  }
++}
++
++// mp2-nx (the boot-time build): the Switch menu's first frame; the boot helpers stop if still running
++void aurora_pipeline_boot_helpers_off(void) {
++  if (aurora::gfx::g_bootHelpers.exchange(false)) {
++    std::fprintf(stderr, "[info] [aurora::gfx::pipeline_cache] pipeline cache: the boot helper threads stop at the "
++                         "first frame; one compile thread from here\n");
++  }
++}
 +
 +void aurora_shader_set_compile_boost(uint32_t on) {
 +  aurora::gfx::g_compileBoost.store(on != 0 ? 1u : 0u, std::memory_order_relaxed);
 +  // Wake the worker so the change applies before it sleeps on an empty queue.
 +  aurora::gfx::g_pipelineQueueCv.notify_all();
-+}
+ }
++} // extern "C"
 diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
 index 85783b60e..cbab58ad8 100644
 --- a/lib/gfx/render_worker.cpp
@@ -831,7 +965,7 @@ index efddaaf2a..f667bc960 100644
                                   worker_main};
  }
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
-index f9d2ad809..048dfd7a2 100644
+index f9d2ad809..0437ed1bf 100644
 --- a/lib/gx/shader.cpp
 +++ b/lib/gx/shader.cpp
 @@ -1,3 +1,4 @@
@@ -839,20 +973,22 @@ index f9d2ad809..048dfd7a2 100644
  #include "../gfx/hash.hpp"
  #include "../gfx/hdr_tone.hpp"
  #include "../gfx/probe.hpp"
-@@ -29,6 +30,12 @@
+@@ -29,6 +30,14 @@
  #include "tracy/Tracy.hpp"
  
  namespace aurora::gx {
 +// mp2-nx: time spent in build_shader (WGSL generation and Dawn's CreateShaderModule, which parses it) on
 +// this thread, so the pipeline compile log can split it from the rest (Tint's SPIR-V and the driver).
 +thread_local uint64_t g_buildShaderNs = 0;
++// mp2-nx (the boot-time build): of g_buildShaderNs, the time in Dawn's CreateShaderModule (its WGSL parse)
++thread_local uint64_t g_dawnShaderNs = 0;
 +// mp2-nx deko3d phase 0: the smoke test (switch/source/deko/dk_smoke.cpp) sets this to copy the GX
 +// shaders it compiles with uam; null otherwise. Called on the compile thread with the final WGSL.
 +void (*g_mp2nxShaderTap)(const std::string& wgsl) = nullptr;
  using namespace fmt::literals;
  using namespace std::string_literals;
  using namespace std::string_view_literals;
-@@ -4981,6 +4988,13 @@ bool shader_overridden(u64 hash) noexcept {
+@@ -4981,6 +4990,13 @@ bool shader_overridden(u64 hash) noexcept {
  
  wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlphaMode) noexcept {
    ZoneScoped;
@@ -866,7 +1002,7 @@ index f9d2ad809..048dfd7a2 100644
    auto shaderSource = build_shader_source(config);
    if (!apply_dst_alpha_mode(shaderSource, dstAlphaMode)) {
      dstAlphaMode = DstAlphaMode::None;
-@@ -5014,6 +5028,9 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlp
+@@ -5014,13 +5030,20 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, DstAlphaMode& dstAlp
        Log.error("wgsl override {:016x} rejected, using the generated source: {}", static_cast<u64>(hash), error);
      }
    }
@@ -876,6 +1012,18 @@ index f9d2ad809..048dfd7a2 100644
    wgpu::ShaderSourceWGSL wgslDescriptor{};
    wgslDescriptor.code = shaderSource.c_str();
    const auto shaderDescriptor = wgpu::ShaderModuleDescriptor{
+       .nextInChain = &wgslDescriptor,
+       .label = label.c_str(),
+   };
+-  return webgpu::g_device.CreateShaderModule(&shaderDescriptor);
++  const auto dawnStart = std::chrono::steady_clock::now();
++  auto module = webgpu::g_device.CreateShaderModule(&shaderDescriptor);
++  g_dawnShaderNs += static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dawnStart).count());
++  return module;
+ }
+ 
+ bool storage_load_clamp_active() noexcept { return clamp_storage_loads() && !gfx::g_vertexFetchTexture; }
 diff --git a/lib/input.cpp b/lib/input.cpp
 index adb5c1f57..7fa852747 100644
 --- a/lib/input.cpp
