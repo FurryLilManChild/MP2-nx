@@ -82,6 +82,7 @@ void submit(const char* why);
 }
 
 namespace mp2dk {
+bool g_down = false;  // mp2-nx: set by mp2nx_dk_shutdown (dk_surface.cpp)
 using aurora::gfx::dk::BindGroup;
 using aurora::gfx::dk::Samp;
 using aurora::gfx::dk::Tex;
@@ -848,6 +849,26 @@ swdk::Block g_dumpBuf;
 uint32_t g_capPass = 0, g_capDraw = 0;
 float g_capViewport[4] = {}, g_capScissor[4] = {};
 
+// GPU times (frame capture): a timestamp report after each pass start and around each draw; the draw's
+// time is from the report before it to the one right after it (snapshots and dumps fall outside). deko3d
+// reports GPU ticks: ns = ticks * 625 / 384 (the 1.6276 of mkdd-nx's OPTIMIZATION.md).
+constexpr uint32_t kTsMax = 4096;
+swdk::Block g_tsBuf;
+uint32_t g_tsUsed = 0, g_tsBase = UINT32_MAX;
+
+uint32_t cap_report() {
+    if (!g_tsBuf) g_tsBuf = swdk::block_create_cached(kTsMax * 16, "frame capture timestamps");
+    if (!g_tsBuf || g_tsUsed >= kTsMax) return UINT32_MAX;
+    dkCmdBufReportCounter(R.cmd, DkCounter_Timestamp, g_tsBuf.gpu + uint64_t(g_tsUsed) * 16);
+    return g_tsUsed++;
+}
+
+uint64_t ts_ns(uint32_t i) {
+    uint64_t ticks;
+    memcpy(&ticks, g_tsBuf.cpu + size_t(i) * 16 + 8, 8);
+    return ticks * 625 / 384;
+}
+
 const char* cap_dir() {
     const char* d = aurora_frame_capture_dir();
     if (d && g_capDir.empty()) {
@@ -858,6 +879,8 @@ const char* cap_dir() {
             1, (std::max(g_fullDrawsLast, kSnapFirst) - kSnapFirst + (kSnapMax - kSnapFirst) - 1) / (kSnapMax - kSnapFirst));
         g_dumps.clear();
         g_dumpUsed = 0;
+        g_tsUsed = 0;
+        g_tsBase = UINT32_MAX;
         g_capText = "deko3d draws of the frame capture\n"
                     "blend: on/off, colour src dst op, alpha src dst op (deko3d DkBlendFactor/DkBlendOp numbers)\n"
                     "depth: test write compare (DkCompareOp)\n";
@@ -1035,9 +1058,13 @@ void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, b
     if (!cap_dir()) return;
     const RPipe* p = r.pipe;
     char line[1024];
+    const uint32_t tsEnd = drawn ? cap_report() : UINT32_MAX, tsStart = g_tsBase;
     const int snap = drawn ? cap_snap(r) : -1;
+    if (drawn) g_tsBase = cap_report();  // (after the snapshot: the next draw's start)
     int n = snprintf(line, sizeof line, "draw %u%s %s %u x%u", g_capDraw++, drawn ? "" : " (NOT DRAWN)",
                      indexed ? "indexed" : "verts", count, instances);
+    if (tsEnd != UINT32_MAX && tsStart != UINT32_MAX)
+        n += snprintf(line + n, sizeof line - n, " | gpu @@T%05u.%05u@@", tsStart, tsEnd);
     if (snap >= 0) n += snprintf(line + n, sizeof line - n, " | snap %d", snap);
     if (p) {
         const DkBlendState& b = p->blend[0];
@@ -1068,6 +1095,35 @@ void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, b
 // at each present: a capture that has ended is written out
 void cap_flush() {
     if (g_capDir.empty() || aurora_frame_capture_dir()) return;
+    // the GPU times into the draw lines (the frame is done: wait for it)
+    if (g_tsUsed && g_tsBuf) {
+        dkQueueWaitIdle(R.queue);
+        armDCacheFlush(g_tsBuf.cpu, g_tsUsed * 16);
+        uint64_t total = 0;
+        std::string out;
+        out.reserve(g_capText.size());
+        size_t at = 0;
+        for (;;) {
+            const size_t k = g_capText.find("@@T", at);
+            if (k == std::string::npos || k + 16 > g_capText.size()) break;
+            out.append(g_capText, at, k - at);
+            const uint32_t a = uint32_t(atoi(g_capText.c_str() + k + 3)), b = uint32_t(atoi(g_capText.c_str() + k + 9));
+            const uint64_t d = (a < g_tsUsed && b < g_tsUsed && ts_ns(b) >= ts_ns(a)) ? ts_ns(b) - ts_ns(a) : 0;
+            total += d;
+            char t[32];
+            snprintf(t, sizeof t, "%.1f us", double(d) / 1000.0);
+            out += t;
+            at = k + 16;
+        }
+        out.append(g_capText, at, std::string::npos);
+        char line[160];
+        snprintf(line, sizeof line,
+                 "\nGPU time of the draws: %.2f ms (each draw timed alone: snapshots, dumps and the barriers around them "
+                 "are outside, and draws do not overlap here as they do in normal play)\n",
+                 double(total) / 1e6);
+        out += line;
+        g_capText.swap(out);
+    }
     const std::string path = g_capDir + "/draws.txt";
     if (FILE* f = fopen(path.c_str(), "wb")) {
         fwrite(g_capText.data(), 1, g_capText.size(), f);
@@ -1088,6 +1144,7 @@ void replay(Replay& r, Enc* e) {
         case OpType::BeginPass:
             cap_pass(e->passes[op.u[0]]);
             begin_pass(r, e->passes[op.u[0]]);
+            if (!g_capDir.empty()) g_tsBase = cap_report();
             break;
         case OpType::EndPass: end_pass(r); break;
         case OpType::SetPipeline:
@@ -1313,6 +1370,7 @@ uint64_t g_immediatesFrameId = ~0ull;
 
 // with g_submitMutex held: the pending queue ops and these command buffers to the GPU
 void submit_cmds_locked(Enc* const* encs, size_t count, const char* why) {
+    if (g_down) return;  // (shutting down: mp2nx_dk_shutdown)
     swdk::frame_open();
     Replay r;
     r.serial = g_nextSerial;

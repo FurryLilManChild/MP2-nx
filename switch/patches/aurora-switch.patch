@@ -1167,10 +1167,10 @@ index 0c65cc1be..0b8a7f239 100644
  public:
    Thread() noexcept = default;
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
-index a4bd6e697..81e082d42 100644
+index a4bd6e697..966389cbb 100644
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -30,6 +30,13 @@
+@@ -30,6 +30,14 @@
  #include "../internal.hpp"
  #include "../window.hpp"
  #include "gpu_prof.hpp"
@@ -1179,12 +1179,13 @@ index a4bd6e697..81e082d42 100644
 +// mp2-nx deko3d renderer (switch/deko/dk_surface.cpp): the run-time choice, the Null device, the set-up
 +extern "C" bool mp2nx_dk_choose(void);
 +extern "C" bool mp2nx_dk_active(void);
++extern "C" void mp2nx_dk_shutdown(void);  // Port (mp2-nx): switch/deko/dk_surface.cpp
 +extern "C" void mp2nx_dk_init(uint32_t gxConfigVersion);
 +#endif
  
  #ifdef WEBGPU_DAWN
  #include "../dawn/TracyPlatform.hpp"
-@@ -994,6 +1001,13 @@ bool surface_window_changed() {
+@@ -994,6 +1002,13 @@ bool surface_window_changed() {
  static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu);
  
  bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
@@ -1198,7 +1199,7 @@ index a4bd6e697..81e082d42 100644
    if (initialize_once(auroraBackend, allowCpu)) {
      return true;
    }
-@@ -1099,7 +1113,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1099,7 +1114,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
          .featureLevel = wgpu::FeatureLevel::Compatibility,
          .powerPreference = lowPower ? wgpu::PowerPreference::LowPower : wgpu::PowerPreference::HighPerformance,
          .backendType = backend,
@@ -1210,7 +1211,7 @@ index a4bd6e697..81e082d42 100644
      };
      Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
               magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
-@@ -1156,6 +1174,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1156,6 +1175,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
      description = wgpu::StringView("Unknown");
    }
    g_backendType = g_adapterInfo.backendType;
@@ -1222,7 +1223,7 @@ index a4bd6e697..81e082d42 100644
    const auto backendName = magic_enum::enum_name(g_backendType);
    auto vendorName = g_adapterInfo.vendor;
    if (vendorName.IsUndefined()) {
-@@ -1542,6 +1565,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1542,6 +1566,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
      g_device.SetLoggingCallback(wgpu_log);
    }
    g_queue = g_device.GetQueue();
@@ -1232,6 +1233,14 @@ index a4bd6e697..81e082d42 100644
  
    if (headless()) {
      // Port: AURORA_HEADLESS: no surface to ask; the framebuffers are made as usual.
+@@ -1619,6 +1646,7 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+ void shutdown() {
+   g_initialized = false;
+   gfx::gpu_synchronize();
++  if (mp2nx_dk_active()) mp2nx_dk_shutdown();  // Port (mp2-nx): the deko3d bridge stops replaying
+   gpu_prof::shutdown();
+   g_CopyBindGroupLayout = {};
+   g_CopyPipeline = {};
 diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
 index d64d2c2f2..d33bc9521 100644
 --- a/lib/webgpu/gpu_cache.cpp

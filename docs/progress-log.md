@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 2026-11-06: fix confirmed; GPU times in the capture, two safety fixes
+
+- The owner: everything looks right on the fix build. Its log has 26 "a new view of 'Resolved Texture' 51x51 came back
+  at the address of a live view" lines in one session (each a wrong texture before), 59-60 presents/s.
+- Read mkdd-nx's RECOMP_PORT_GUIDE, DEKO3D_MIGRATION and OPTIMIZATION docs (guidance only, no code taken).
+  Already here: the BC tile size fix, uam dual issue off, background shader compiles with a cache, buffered
+  logs, fences and deferred frees. Candidates: per-draw GPU times (their biggest lesson), presenting straight
+  from the EFB instead of the final copy (2 to 4.6 ms for them), cheaper EFB copies (one barrier for consecutive
+  copies), ZCULL (0.2 ms), command memory slack, freeing everything at exit, counting new game frames.
+- This build: (1) the frame capture times every draw on the GPU (timestamp reports before and after each draw,
+  ticks * 625 / 384 = ns), written into draws.txt as "gpu N us" with the frame's total; snapshots and dumps fall
+  outside the timed spans, and draws are serialized there, so the times are each draw alone. (2) 256 bytes of
+  slack at the end of every command memory piece. (3) mp2nx_dk_shutdown, called by Aurora's webgpu::shutdown:
+  no replay or present after it (the crash on quit).
+- Clocks: gameplay at stock; ApmCpuBoostMode_FastLoad only while loading (load_boost.cpp). The owner will check
+  that sys-clk has no profile for the game.
+
 ## 2026-11-06: the cause, probably: shadows taken over by new objects at reused addresses
 
 - The owner's 10 deko3d captures with the hashing build: every sampled texture's level 0 matches the bytes its upload

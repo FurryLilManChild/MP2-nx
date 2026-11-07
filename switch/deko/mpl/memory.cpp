@@ -75,9 +75,11 @@ std::vector<DkMemBlock> g_deferredBlocks;
 // 64 KB of this frame's slice, then the slot's overflow blocks.
 void add_cmd_memory(void*, DkCmdBuf cmd, size_t minReqSize) {
     Slot& s = g_slots[g_slot];
-    const uint32_t want = align_up(uint32_t(std::max<size_t>(minReqSize, kCmdChunk)), DK_MEMBLOCK_ALIGNMENT);
+    const uint32_t want = align_up(uint32_t(std::max<size_t>(minReqSize + 256, kCmdChunk)), DK_MEMBLOCK_ALIGNMENT);
     if (s.cmdUsed + want <= kCmdSliceSize) {
-        dkCmdBufAddMemory(cmd, g_cmdMem, g_slot * kCmdSliceSize + s.cmdUsed, want);
+        // (mp2-nx: 256 bytes held back at the end of each piece: deko3d 0.5.0 can write a few words past
+        // the end, mkdd-nx DEKO3D_MIGRATION.md; here that would be the next slot's slice, possibly in flight)
+        dkCmdBufAddMemory(cmd, g_cmdMem, g_slot * kCmdSliceSize + s.cmdUsed, want - 256);
         s.cmdUsed += want;
         g_cmdFedThisFrame += want;
         return;
@@ -86,7 +88,7 @@ void add_cmd_memory(void*, DkCmdBuf cmd, size_t minReqSize) {
     while (s.cmdOverflowUsed < s.cmdOverflow.size()) {
         auto [block, size] = s.cmdOverflow[s.cmdOverflowUsed++];
         if (size < want) continue;
-        dkCmdBufAddMemory(cmd, block, 0, size);
+        dkCmdBufAddMemory(cmd, block, 0, size - 256);
         g_cmdFedThisFrame += size;
         return;
     }
@@ -96,7 +98,7 @@ void add_cmd_memory(void*, DkCmdBuf cmd, size_t minReqSize) {
     DkMemBlock b = make_block(size, DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached, "command overflow");
     s.cmdOverflow.push_back({b, size});
     s.cmdOverflowUsed = s.cmdOverflow.size();
-    dkCmdBufAddMemory(cmd, b, 0, size);
+    dkCmdBufAddMemory(cmd, b, 0, size - 256);
     g_cmdFedThisFrame += size;
 }
 
@@ -260,7 +262,7 @@ void frame_begin(uint64_t frame) {
     // dkCmdBufClear rewinds to the start of the memory fed last (deko3d 0.5.0 keeps it), which belongs
     // to the previous frame: feed this slot's first chunk explicitly (as deko_examples' CCmdMemRing)
     dkCmdBufClear(R.cmd);
-    dkCmdBufAddMemory(R.cmd, g_cmdMem, g_slot * kCmdSliceSize, kCmdChunk);
+    dkCmdBufAddMemory(R.cmd, g_cmdMem, g_slot * kCmdSliceSize, kCmdChunk - 256);  // (the slack, as below)
     s.cmdUsed = kCmdChunk;
     s.cmdOverflowUsed = 0;
     g_cmdFedThisFrame = kCmdChunk;

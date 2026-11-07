@@ -42,6 +42,7 @@ void objects_frame_start_hook() { aurora::gfx::dk::objects_frame_start(); }
 }
 
 namespace mp2dk {
+extern bool g_down;
 void encoder_init();
 void encoder_report();
 void cycle_tick();
@@ -170,6 +171,14 @@ bool mp2nx_dk_active(void) { return mp2dk::on(); }
 void mp2nx_dk_init(uint32_t gxConfigVersion) { mp2dk::init(gxConfigVersion); }
 // the Switch menu: the renderer of this start, the choice for the next, and whether it fell back
 bool mp2nx_dk_fell_back(void) { return g_fellBack; }
+// Aurora's webgpu::shutdown, before it lets go of its objects: nothing is replayed or presented after this
+// (the crash on quit: crash.txt "replay: begin render pass", a freed buffer in prepare_draw, after Aurora's
+// "Device lost: Device was destroyed")
+void mp2nx_dk_shutdown(void) {
+    std::lock_guard<std::mutex> lock(mp2dk::submit_mutex());
+    mp2dk::g_down = true;
+    log("shutting down: no more submits or presents");
+}
 bool mp2nx_dk_chosen(void) {
     FILE* f = fopen(kChoicePath, "r");
     if (!f) return false;
@@ -267,6 +276,7 @@ void __wrap_wgpuSurfaceGetCurrentTexture(WGPUSurface s, WGPUSurfaceTexture* out)
 
 WGPUStatus __wrap_wgpuSurfacePresent(WGPUSurface s) {
     if (!is_ours(s)) return __real_wgpuSurfacePresent(s);
+    if (mp2dk::g_down) return WGPUStatus_Success;
     {
         std::lock_guard<std::mutex> lock(submit_mutex());
         flush_locked("the present");
