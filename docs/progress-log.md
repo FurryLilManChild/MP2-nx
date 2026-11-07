@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-11-06: the capture crash; fewer snapshots
+
+- Two deko3d boots looked right throughout (no fix was in them: the capture code does nothing until the click).
+- On a door opening the owner clicked capture and the game died with no crash.txt. Atmosphere report
+  01794020303_056400c403925000.log: User Break in svcBreak, from dkQueuePresentImage > Queue::flush >
+  CmdBuf::signOffGpfifoEntry, i.e. deko3d aborting in the capture frame's present. The new thing in that frame:
+  a snapshot after every full-size draw, each a 2D blit between two full barriers (hundreds per frame).
+- Now: every Nth full-size draw (N from the frame before's count, 60 snapshots at most), atlas 16 x 4 cells.
+- Reminder for the owner's crash reports: Atmosphere names them by the Unix time in seconds, so give him the
+  leading digits to look for (date -u -d "..." +%s).
+
 ## 2026-11-06: first captures; whole-frame fix, per-draw snapshots
 
 - The owner's first captures (cap001-003 deko3d, cap004-007 Vulkan; deko3d first, the spots roughly matched).

@@ -810,6 +810,9 @@ const char* const kOpNotes[] = {
 // ---- mp2-nx (frame capture): while Aurora records a capture (aurora_frame_capture_dir, encoding.cpp), every
 // pass and draw replayed is listed in draws.txt in its folder, written when the capture ends.
 std::string g_capText, g_capDir;
+// (the snapshots, below)
+constexpr uint32_t kSnapW = 256, kSnapH = 144, kSnapCols = 16, kSnapRows = 4, kSnapMax = 60;
+uint32_t g_fullDraws = 0, g_fullDrawsLast = 0, g_snapStride = 1, g_snapSeen = 0;
 uint32_t g_capPass = 0, g_capDraw = 0;
 float g_capViewport[4] = {}, g_capScissor[4] = {};
 
@@ -818,9 +821,15 @@ const char* cap_dir() {
     if (d && g_capDir.empty()) {
         g_capDir = d;
         g_capPass = 0;
+        g_snapSeen = 0;
+        g_snapStride = std::max<uint32_t>(1, (g_fullDrawsLast + kSnapMax - 1) / kSnapMax);
         g_capText = "deko3d draws of the frame capture\n"
                     "blend: on/off, colour src dst op, alpha src dst op (deko3d DkBlendFactor/DkBlendOp numbers)\n"
-                    "depth: test write compare (DkCompareOp)\n\n";
+                    "depth: test write compare (DkCompareOp)\n";
+        char line[96];
+        snprintf(line, sizeof line, "snapshots: every %u full-size draws (%u in the frame before)\n\n", g_snapStride,
+                 g_fullDrawsLast);
+        g_capText += line;
     }
     return d;
 }
@@ -844,10 +853,11 @@ void cap_pass(const PassDesc& p) {
     g_capText += "\n";
 }
 
-// Snapshots: after every draw into a full-size target (the EFB), the 2D engine shrinks the target into a
-// 256x144 cell of an atlas (32 x 16 cells); at the end the atlas is written as draws_atlas.pam, the cell
-// number on each draw's line (snap N: column N % 32, row N / 32).
-constexpr uint32_t kSnapW = 256, kSnapH = 144, kSnapCols = 32, kSnapRows = 16;
+// Snapshots: after draws into a full-size target (the EFB), the 2D engine shrinks the target into a 256x144
+// cell of an atlas (16 x 4 cells); at the end the atlas is written as draws_atlas.pam, the cell number on the
+// draw's line (snap N: column N % 16, row N / 16). Every draw was too much: deko3d aborted in the capture
+// frame's present (signOffGpfifoEntry; Atmosphere report 01794020303), so the snapshots are spread over the
+// frame: every Nth full-size draw, N from the frame before (g_fullDrawsLast), 60 at most.
 DkMemBlock g_snapMem = nullptr;
 DkImage g_snapImg;
 uint32_t g_snapUsed = 0;
@@ -883,7 +893,8 @@ int cap_snap(const Replay& r) {
     if (!r.pass || r.pass->colorCount == 0) return -1;
     const View* v = r.pass->colors[0].view;
     if (!v || !v->tex || !v->tex->valid || v->tex->width < 640 || v->tex->depth) return -1;
-    if (g_snapUsed >= kSnapCols * kSnapRows || !snap_init()) return -1;
+    if (g_snapSeen++ % g_snapStride != g_snapStride - 1) return -1;
+    if (g_snapUsed >= kSnapMax || !snap_init()) return -1;
     const uint32_t k = g_snapUsed++;
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
     const DkImageView sv = level_view(v->tex, v->baseMip);
@@ -1015,6 +1026,9 @@ void replay(Replay& r, Enc* e) {
         }
         case OpType::Draw: {
             const bool ok = prepare_draw(r);
+            if (ok && r.pass && r.pass->colorCount && r.pass->colors[0].view && r.pass->colors[0].view->tex &&
+                r.pass->colors[0].view->tex->width >= 640)
+                g_fullDraws++;
             if (ok) {
                 dkCmdBufDraw(R.cmd, r.pipe->prim, op.u[0], op.u[1], op.u[2], op.u[3]);
                 r.draws++;
@@ -1024,6 +1038,9 @@ void replay(Replay& r, Enc* e) {
         }
         case OpType::DrawIndexed: {
             const bool ok = prepare_draw(r);
+            if (ok && r.pass && r.pass->colorCount && r.pass->colors[0].view && r.pass->colors[0].view->tex &&
+                r.pass->colors[0].view->tex->width >= 640)
+                g_fullDraws++;
             if (ok) {
                 dkCmdBufDrawIndexed(R.cmd, r.pipe->prim, op.u[0], op.u[1], op.u[2], op.i[3], op.u[4]);
                 r.draws++;
@@ -1498,7 +1515,11 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
 bool cycle_blank_resolved() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeBlankResolved; }
 bool cycle_discard_rules() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeDiscardRules; }
 void count_discarded_sample() { g_discardSamples.fetch_add(1, std::memory_order_relaxed); }
-void capture_flush() { cap_flush(); }  // (dk_surface.cpp, at every present)
+void capture_flush() {  // (dk_surface.cpp, at every present)
+    g_fullDrawsLast = g_fullDraws;
+    g_fullDraws = 0;
+    cap_flush();
+}
 
 void encoder_report() {
     log("encoder: %llu submits, %llu draws (%llu skipped: shaders not ready or no pipeline), %llu passes, %llu copies, "
