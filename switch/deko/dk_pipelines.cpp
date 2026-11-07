@@ -47,6 +47,7 @@ namespace {
 
 struct Mod {
     std::atomic<int32_t> refs{1};
+    const void* handle = nullptr;
     std::string wgsl;
     uint64_t hash = 0;
 };
@@ -454,6 +455,91 @@ void pipelines_report() {
         g_blendCensus[4].load());
 }
 
+// mp2-nx (the white-texture fix): a pipeline descriptor's contents (shader sources by hash, not by handle),
+// to tell Dawn's cache hit from a new pipeline at a freed one's address (see dk_objects.cpp CreateView)
+uint64_t pipeline_fingerprint(const WGPURenderPipelineDescriptor& d) {
+    XXH3_state_t* st = XXH3_createState();
+    XXH3_64bits_reset(st);
+    auto put = [&](const void* p, size_t n) { XXH3_64bits_update(st, p, n); };
+    auto put_u = [&](uint64_t v) { put(&v, sizeof v); };
+    auto put_s = [&](WGPUStringView s) {
+        const std::string t = str(s);
+        put_u(t.size());
+        put(t.data(), t.size());
+    };
+    auto put_mod = [&](WGPUShaderModule m) {
+        const Mod* mod = find(g_modules, m);
+        put_u(mod ? mod->hash : uint64_t(reinterpret_cast<uintptr_t>(m)));
+    };
+    put_u(uint64_t(reinterpret_cast<uintptr_t>(d.layout)));
+    put_mod(d.vertex.module);
+    put_s(d.vertex.entryPoint);
+    put_u(d.vertex.bufferCount);
+    for (size_t i = 0; i < d.vertex.bufferCount; i++) {
+        const WGPUVertexBufferLayout& b = d.vertex.buffers[i];
+        put_u(b.stepMode);
+        put_u(b.arrayStride);
+        put_u(b.attributeCount);
+        for (size_t a = 0; a < b.attributeCount; a++) {
+            put_u(b.attributes[a].format);
+            put_u(b.attributes[a].offset);
+            put_u(b.attributes[a].shaderLocation);
+        }
+    }
+    put_u(d.primitive.topology);
+    put_u(d.primitive.stripIndexFormat);
+    put_u(d.primitive.frontFace);
+    put_u(d.primitive.cullMode);
+    put_u(d.primitive.unclippedDepth);
+    if (const WGPUDepthStencilState* z = d.depthStencil) {
+        put_u(1);
+        put_u(z->format);
+        put_u(z->depthWriteEnabled);
+        put_u(z->depthCompare);
+        for (const WGPUStencilFaceState* f : {&z->stencilFront, &z->stencilBack}) {
+            put_u(f->compare);
+            put_u(f->failOp);
+            put_u(f->depthFailOp);
+            put_u(f->passOp);
+        }
+        put_u(z->stencilReadMask);
+        put_u(z->stencilWriteMask);
+        put_u(uint64_t(uint32_t(z->depthBias)));
+        put(&z->depthBiasSlopeScale, sizeof z->depthBiasSlopeScale);
+        put(&z->depthBiasClamp, sizeof z->depthBiasClamp);
+    } else {
+        put_u(0);
+    }
+    put_u(d.multisample.count);
+    put_u(d.multisample.mask);
+    put_u(d.multisample.alphaToCoverageEnabled);
+    if (const WGPUFragmentState* f = d.fragment) {
+        put_mod(f->module);
+        put_s(f->entryPoint);
+        put_u(f->targetCount);
+        for (size_t i = 0; i < f->targetCount; i++) {
+            const WGPUColorTargetState& t = f->targets[i];
+            put_u(t.format);
+            put_u(t.writeMask);
+            if (t.blend) {
+                const WGPUBlendComponent* cs[2] = {&t.blend->color, &t.blend->alpha};
+                for (const WGPUBlendComponent* c : cs) {
+                    put_u(c->operation);
+                    put_u(c->srcFactor);
+                    put_u(c->dstFactor);
+                }
+            } else {
+                put_u(0xFFFF);
+            }
+        }
+    } else {
+        put_u(0);
+    }
+    const uint64_t h = XXH3_64bits_digest(st);
+    XXH3_freeState(st);
+    return h;
+}
+
 }  // namespace mp2dk
 
 using namespace mp2dk;
@@ -464,19 +550,25 @@ WGPUShaderModule __wrap_wgpuDeviceCreateShaderModule(WGPUDevice device, WGPUShad
     WGPUShaderModule m = __real_wgpuDeviceCreateShaderModule(device, d);
     if (!m || !d || !on() || !swdk::R.device) return m;
     // (Dawn returns a cached module for the same source with one more reference: its shadow takes it)
-    if (Mod* existing = find(g_modules, m)) {
-        existing->refs.fetch_add(1, std::memory_order_relaxed);
-        return m;
-    }
+    // mp2-nx (the white-texture fix): ...but only when the source is the same; a new module can come back at
+    // a freed one's address while its shadow still lives (see dk_objects.cpp CreateView)
+    Mod* existing = find(g_modules, m);
     for (const WGPUChainedStruct* c = d->nextInChain; c; c = c->next) {
         if (c->sType != WGPUSType_ShaderSourceWGSL) continue;
         auto* mod = new Mod;
         mod->wgsl = str(reinterpret_cast<const WGPUShaderSourceWGSL*>(c)->code);
         mod->hash = XXH3_64bits(mod->wgsl.data(), mod->wgsl.size());
+        if (existing && existing->hash == mod->hash) {
+            existing->refs.fetch_add(1, std::memory_order_relaxed);
+            delete mod;
+            return m;
+        }
+        if (existing) log("pipelines: a new shader module came back at the address of a live one: it replaces it");
         std::unique_lock<std::shared_mutex> lock(g_mutex);
         g_modules[m] = mod;
-        break;
+        return m;
     }
+    if (existing) existing->refs.fetch_add(1, std::memory_order_relaxed);  // (no WGSL: as before)
     return m;
 }
 
@@ -496,12 +588,19 @@ WGPURenderPipeline __wrap_wgpuDeviceCreateRenderPipeline(WGPUDevice device, WGPU
     WGPURenderPipeline p = __real_wgpuDeviceCreateRenderPipeline(device, d);
     if (!p || !d || !on() || !swdk::R.device) return p;
     // (Dawn returns a cached pipeline for an equal descriptor with one more reference: its shadow takes it)
+    // mp2-nx (the white-texture fix): ...but only when it was built from the same descriptor
+    const uint64_t fingerprint = pipeline_fingerprint(*d);
     if (RPipe* existing = find(g_pipelines, p)) {
-        pipeline_retain(existing);
-        return p;
+        if (existing->fingerprint == fingerprint) {
+            pipeline_retain(existing);
+            return p;
+        }
+        log("pipelines: a new pipeline came back at the address of a live one built from another descriptor: it "
+            "replaces it");
     }
     auto* pipe = new RPipe;
     pipe->handle = p;
+    pipe->fingerprint = fingerprint;
     note("pipeline build (compile thread)");
     build(pipe, *d);
     {

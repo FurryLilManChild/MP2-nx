@@ -489,7 +489,9 @@ void buffer_to_image(Replay& r, DkGpuAddr src, uint32_t rowBytes, uint32_t rows,
     const uint32_t w = std::min(e.width, lw - o.x), h = std::min(e.height, lh - o.y);
     if (w == 0 || h == 0) return;
     t->discarded = false;
-    if (mip == 0 && o.x == 0 && o.y == 0 && o.z == 0 && w == lw && h == lh && t->layers == 1 && !t->is3d)
+    // (deko3d_env.txt MP2DK_UPLOAD_HASH=1: on; it answered its question, the uploads arrive intact)
+    static const bool kHash = swdk::env_flag("MP2DK_UPLOAD_HASH", false);
+    if (kHash && mip == 0 && o.x == 0 && o.y == 0 && o.z == 0 && w == lw && h == lh && t->layers == 1 && !t->is3d)
         t->uploadHash = cpu && src != g_zero.gpu ? level_hash(cpu, rowBytes, t, w, h) : 0;
     if (src != g_zero.gpu) {
         t->written = true;

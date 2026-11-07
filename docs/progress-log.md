@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 2026-11-06: the cause, probably: shadows taken over by new objects at reused addresses
+
+- The owner's 10 deko3d captures with the hashing build: every sampled texture's level 0 matches the bytes its upload
+  copied from (0 different in all 10), and no two textures share a descriptor slot. So the data is intact; the
+  draws read the wrong texture.
+- cap008 (a rock wall drawn flat grey): the snapshots put the wall at draw 6, pipeline 7d59fe82 (the world
+  shader: a 512x512 BC1 lightmap and a surface texture), and its surface texture is 'Resolved Texture' 51x51,
+  an EFB copy. Earlier captures show the same: strip draws and door draws sampling that 51x51 copy.
+- Mechanism: __wrap_wgpuTextureCreateView (and CreateSampler, CreateShaderModule, CreateRenderPipeline) took a
+  live shadow at the returned address as Dawn's cache hit. But Dawn frees an object as soon as Aurora lets go,
+  while this bridge keeps its shadow alive longer (encoders until replay, bind groups); a NEW object at the
+  same address then inherited the old shadow, i.e. a new view of a wall texture became the old view of an EFB
+  copy. Address reuse depends on timing and allocation order: different textures on every boot.
+- Fix: a cache hit only when the shadow matches (views: same texture, levels, layers, format, type, swizzle;
+  samplers: same state key; modules: same WGSL hash; pipelines: same descriptor fingerprint), otherwise the new
+  shadow replaces the old in the map (the old lives on for its holders). Each replacement is logged
+  ("came back at the address of a live ..."), which confirms the mechanism on the console.
+- Upload hashing now off by default (MP2DK_UPLOAD_HASH=1 turns it on).
+
 ## 2026-11-06: 20 more captures (cap009-028); upload hashes
 
 - cap009-019 deko3d against cap020-028 Vulkan of the same spots (one bad boot): shot decals as white squares

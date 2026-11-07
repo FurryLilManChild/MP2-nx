@@ -44,6 +44,8 @@ namespace {
 std::shared_mutex g_mutex;
 std::unordered_map<const void*, Tex*> g_textures;
 std::unordered_map<const void*, View*> g_views;
+// mp2-nx: new objects that came back at a live shadow's address (logged with the object counts)
+std::atomic<uint64_t> g_reusedViews{0}, g_reusedSamplers{0};
 std::unordered_map<const void*, Samp*> g_samplers;
 std::unordered_map<const void*, BindGroup*> g_bindGroups;
 // mp2-nx: bind group layouts' dynamic-offset bindings, in binding order (the order of the offsets
@@ -562,12 +564,19 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
     // mp2-nx (deko-9): Dawn hands back a cached object for an equal descriptor (views, samplers, layouts,
     // shader modules, pipelines) with one more reference; its shadow takes that reference instead of being
     // replaced by a new one (a replaced shadow died at the first release while Aurora still used it)
-    if (View* existing = find(g_views, v); existing && existing->magic == kAlive) {
-        existing->refs.fetch_add(1, std::memory_order_relaxed);
+    // mp2-nx (the white-texture fix): ...but the same address also comes back for a NEW view once Dawn has freed
+    // the old one, while this shadow still lives (an encoder or a bind group here holds it longer than Dawn
+    // does). Taking that as a cache hit gave the new view the old one's texture: a wall sampled an EFB copy
+    // (frame capture cap008: draw 6, a rock wall, reading 'Resolved Texture' 51x51), different textures on
+    // every boot. So the existing shadow is kept only when it is the same view of the same texture; otherwise
+    // the new one replaces it in the map (the old one lives on for whoever still holds it).
+    View* existing = find(g_views, v);
+    if (existing && existing->magic != kAlive) existing = nullptr;
+    Tex* t = find(g_textures, texture);
+    if (!v || !t) {
+        if (existing) existing->refs.fetch_add(1, std::memory_order_relaxed);
         return v;
     }
-    Tex* t = find(g_textures, texture);
-    if (!v || !t) return v;
     auto* view = new View;
     view->handle = v;
     view->tex = t;
@@ -628,6 +637,26 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
             view->view.swizzle[3] = swizzle_of(s->swizzle.a, DkImageSwizzle_Alpha);
         }
     }
+    if (existing && existing->tex == t && existing->baseMip == view->baseMip && existing->mipCount == view->mipCount &&
+        existing->view.format == view->view.format && existing->view.type == view->view.type &&
+        existing->view.layerOffset == view->view.layerOffset && existing->view.layerCount == view->view.layerCount &&
+        existing->view.dsSource == view->view.dsSource &&
+        memcmp(existing->view.swizzle, view->view.swizzle, sizeof view->view.swizzle) == 0) {
+        // a real cache hit (Dawn handed back the same view)
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        release_tex(t);
+        delete view;
+        return v;
+    }
+    if (existing) {
+        const uint64_t n = g_reusedViews.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 20 || (n & (n - 1)) == 0)
+            mp2dk::log("objects: a new view of '%s' %ux%u came back at the address of a live view of '%s' %ux%u "
+                       "(%llu so far): the new one replaces it",
+                       t->label.c_str(), t->width, t->height, existing->tex ? existing->tex->label.c_str() : "?",
+                       existing->tex ? existing->tex->width : 0, existing->tex ? existing->tex->height : 0,
+                       (unsigned long long)n);
+    }
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_views[v] = view;
     g_stats.views++;
@@ -652,10 +681,9 @@ WGPUSampler __wrap_wgpuDeviceCreateSampler(WGPUDevice device, WGPUSamplerDescrip
     // mp2-nx (deko-9): Dawn hands back a cached object for an equal descriptor (views, samplers, layouts,
     // shader modules, pipelines) with one more reference; its shadow takes that reference instead of being
     // replaced by a new one (a replaced shadow died at the first release while Aurora still used it)
-    if (Samp* existing = find(g_samplers, s); existing && existing->magic == kAlive) {
-        existing->refs.fetch_add(1, std::memory_order_relaxed);
-        return s;
-    }
+    // mp2-nx (the white-texture fix): a cache hit only when the state is the same (see CreateView)
+    Samp* existing = find(g_samplers, s);
+    if (existing && existing->magic != kAlive) existing = nullptr;
     auto* samp = new Samp;
     samp->handle = s;
     DkSampler& k = samp->sampler;
@@ -679,6 +707,18 @@ WGPUSampler __wrap_wgpuDeviceCreateSampler(WGPUDevice device, WGPUSamplerDescrip
         k.compareOp = DkCompareOp(DkCompareOp_Never + (int(sd.compare) - int(WGPUCompareFunction_Never)));
     }
     samp->key = fnv_bytes(&k, sizeof k);
+    if (existing && existing->key == samp->key) {
+        existing->refs.fetch_add(1, std::memory_order_relaxed);
+        delete samp;
+        return s;
+    }
+    if (existing) {
+        const uint64_t n = g_reusedSamplers.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 20 || (n & (n - 1)) == 0)
+            mp2dk::log("objects: a new sampler came back at the address of a live one with other state (%llu so far): "
+                       "the new one replaces it",
+                       (unsigned long long)n);
+    }
     std::unique_lock<std::shared_mutex> lock(g_mutex);
     g_samplers[s] = samp;
     g_stats.samplers++;

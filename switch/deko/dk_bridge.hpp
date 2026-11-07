@@ -82,7 +82,8 @@ struct RPipe {
     // mp2-nx (deko-14 test cycle): what its blending reads (kBlend* in dk_encoder.cpp's cycle)
     uint8_t blendKinds = 0;
     uint32_t id = 0;  // mp2-nx (deko-16): the order it was built in (the test cycle's groups)
-    int8_t tag = -1;  // mp2-nx (deko-17): which of deko-16's group 2 suspects it is (0 none, -1 not yet known)
+    int8_t tag = -1;
+    uint64_t fingerprint = 0;  // mp2-nx: what it was built from (pipeline_fingerprint, dk_pipelines.cpp)  // mp2-nx (deko-17): which of deko-16's group 2 suspects it is (0 none, -1 not yet known)
 };
 // mp2-nx (deko-14): RPipe::blendKinds bits
 constexpr uint8_t kBlendAny = 1, kBlendDst = 2, kBlendSrc1 = 4, kBlendConst = 8;
