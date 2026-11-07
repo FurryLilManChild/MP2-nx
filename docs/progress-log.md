@@ -2,6 +2,22 @@
 
 Newest first.
 
+## 2026-11-06: first useful captures (door, strips); texture dumps next
+
+- cap001-003 deko3d (bad boot), cap004-008 Vulkan. Frames now whole: pass 0 'EFB' (4-5 draws, the 51x51
+  EFB copy at 0,617 103x103) and pass 1 'EFB' (390-640 draws).
+- Strips (cap003): snapshot 0 (after draw 2) is still black there, snapshot 1 (after draw 9) already has the
+  flat grey strips. Draws 3-9 are all pipeline 'GX Pipeline 7d59fe82facd62e1 shader 1d56d2d94004670a', opaque,
+  two textures: a 512x512 BC1 with one level on every world draw (likely the lightmap) and a per-draw one.
+  Flat grey with a soft gradient looks like the lightmap times a white second texture.
+- Door (cap001): the white hexagon appears between snapshots 21 and 22, draws 241-247, all additive
+  (SrcAlpha, One) with 64x64 textures (BC1, one RGBA8): an additive glow that saturates to white.
+- Samus earlier: flat bright orange. Common thread so far: textures that sample as (near) white. It changes
+  from boot to boot, so it is data, not a translation rule. Next: dump every texture a captured draw samples,
+  with its descriptor slot, to see whether the texture holds the wrong data or the draw reads the wrong one.
+- Capture now: snapshots of the frame's first 40 full-size draws one by one, then every Nth (64 at most);
+  every sampled texture's first level written as texNNN_WxH_fmtXX.raw, the draw lines naming #NNN and slot.
+
 ## 2026-11-06: the capture crash; fewer snapshots
 
 - Two deko3d boots looked right throughout (no fix was in them: the capture code does nothing until the click).

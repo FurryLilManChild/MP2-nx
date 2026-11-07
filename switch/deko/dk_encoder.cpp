@@ -811,8 +811,21 @@ const char* const kOpNotes[] = {
 // pass and draw replayed is listed in draws.txt in its folder, written when the capture ends.
 std::string g_capText, g_capDir;
 // (the snapshots, below)
-constexpr uint32_t kSnapW = 256, kSnapH = 144, kSnapCols = 16, kSnapRows = 4, kSnapMax = 60;
+constexpr uint32_t kSnapW = 256, kSnapH = 144, kSnapCols = 16, kSnapRows = 4, kSnapMax = 64;
+constexpr uint32_t kSnapFirst = 40;  // every one of the frame's first 40 full-size draws, then every Nth
 uint32_t g_fullDraws = 0, g_fullDrawsLast = 0, g_snapStride = 1, g_snapSeen = 0;
+// Texture dumps: every texture a captured draw samples (its view's first level, as stored: BC1 blocks or
+// texels), copied at that draw into one 24 MiB buffer and written as texNNN_WxH_fmtXX.raw; the draw lines
+// name them (#NNN) with the descriptor slot.
+struct Dump {
+    const Tex* tex;
+    uint32_t id, w, h, rowBytes, rows, offset;
+    unsigned fmt;
+};
+std::vector<Dump> g_dumps;
+uint32_t g_dumpUsed = 0;
+constexpr uint32_t kDumpBytes = 24u << 20;
+swdk::Block g_dumpBuf;
 uint32_t g_capPass = 0, g_capDraw = 0;
 float g_capViewport[4] = {}, g_capScissor[4] = {};
 
@@ -822,13 +835,16 @@ const char* cap_dir() {
         g_capDir = d;
         g_capPass = 0;
         g_snapSeen = 0;
-        g_snapStride = std::max<uint32_t>(1, (g_fullDrawsLast + kSnapMax - 1) / kSnapMax);
+        g_snapStride = std::max<uint32_t>(
+            1, (std::max(g_fullDrawsLast, kSnapFirst) - kSnapFirst + (kSnapMax - kSnapFirst) - 1) / (kSnapMax - kSnapFirst));
+        g_dumps.clear();
+        g_dumpUsed = 0;
         g_capText = "deko3d draws of the frame capture\n"
                     "blend: on/off, colour src dst op, alpha src dst op (deko3d DkBlendFactor/DkBlendOp numbers)\n"
                     "depth: test write compare (DkCompareOp)\n";
         char line[96];
-        snprintf(line, sizeof line, "snapshots: every %u full-size draws (%u in the frame before)\n\n", g_snapStride,
-                 g_fullDrawsLast);
+        snprintf(line, sizeof line, "snapshots: the first %u full-size draws, then every %u (%u in the frame before)\n\n",
+                 kSnapFirst, g_snapStride, g_fullDrawsLast);
         g_capText += line;
     }
     return d;
@@ -893,7 +909,8 @@ int cap_snap(const Replay& r) {
     if (!r.pass || r.pass->colorCount == 0) return -1;
     const View* v = r.pass->colors[0].view;
     if (!v || !v->tex || !v->tex->valid || v->tex->width < 640 || v->tex->depth) return -1;
-    if (g_snapSeen++ % g_snapStride != g_snapStride - 1) return -1;
+    const uint32_t seen = g_snapSeen++;
+    if (seen >= kSnapFirst && (seen - kSnapFirst) % g_snapStride != g_snapStride - 1) return -1;
     if (g_snapUsed >= kSnapMax || !snap_init()) return -1;
     const uint32_t k = g_snapUsed++;
     dkCmdBufBarrier(R.cmd, DkBarrier_Full, kInvalidateAll);
@@ -937,6 +954,45 @@ void snap_write(const std::string& dir) {
     g_snapUsed = 0;
 }
 
+int cap_dump(const View* v) {
+    const Tex* t = v->tex;
+    for (const Dump& d : g_dumps)
+        if (d.tex == t) return int(d.id);
+    if (!t->valid || t->depth || t->external || t->samples > 1 || t->is3d || g_dumps.size() >= 400) return -1;
+    if (!g_dumpBuf) g_dumpBuf = swdk::block_create_cached(kDumpBytes, "frame capture texture dumps");
+    if (!g_dumpBuf) return -1;
+    const uint32_t mip = v->baseMip;
+    const uint32_t w = std::max(1u, t->width >> mip), h = std::max(1u, t->height >> mip);
+    const uint32_t rowBytes = (w + t->blockW - 1) / t->blockW * t->blockBytes, rows = (h + t->blockH - 1) / t->blockH;
+    const uint32_t size = (rowBytes * rows + 255) & ~255u;
+    if (g_dumpUsed + size > kDumpBytes) return -1;
+    Dump d{t, uint32_t(g_dumps.size()), w, h, rowBytes, rows, g_dumpUsed, unsigned(t->wformat)};
+    g_dumpUsed += size;
+    const DkImageView iv = level_view(const_cast<Tex*>(t), mip);
+    const DkImageRect rect = {0, 0, 0, w, h, 1};
+    const DkCopyBuf buf = {g_dumpBuf.gpu + d.offset, rowBytes, rowBytes * rows};
+    dkCmdBufCopyImageToBuffer(R.cmd, &iv, &rect, &buf, 0);
+    g_dumps.push_back(d);
+    return int(d.id);
+}
+
+void dumps_write(const std::string& dir) {
+    if (g_dumps.empty() || !g_dumpBuf) return;
+    dkQueueWaitIdle(R.queue);
+    armDCacheFlush(g_dumpBuf.cpu, g_dumpUsed);
+    for (const Dump& d : g_dumps) {
+        char path[256];
+        snprintf(path, sizeof path, "%s/tex%03u_%ux%u_fmt%02X.raw", dir.c_str(), d.id, d.w, d.h, d.fmt);
+        if (FILE* f = fopen(path, "wb")) {
+            fwrite(g_dumpBuf.cpu + d.offset, 1, size_t(d.rowBytes) * d.rows, f);
+            fclose(f);
+        }
+    }
+    log("frame capture: %zu textures dumped (%u KiB)", g_dumps.size(), g_dumpUsed >> 10);
+    g_dumps.clear();
+    g_dumpUsed = 0;
+}
+
 void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, bool indexed) {
     if (!cap_dir()) return;
     const RPipe* p = r.pipe;
@@ -959,9 +1015,11 @@ void cap_draw(const Replay& r, bool drawn, uint32_t count, uint32_t instances, b
                       g_capViewport[1], g_capViewport[2], g_capViewport[3], g_capScissor[0], g_capScissor[1],
                       g_capScissor[2], g_capScissor[3]);
         samples_any(r, [&](const View* v) {
-            if (n < int(sizeof line) - 80)
-                n += snprintf(line + n, sizeof line - n, " | tex '%s' %ux%u fmt 0x%X mips %u", v->tex->label.c_str(),
-                              v->tex->width, v->tex->height, unsigned(v->tex->wformat), v->mipCount);
+            const int id = cap_dump(v);
+            if (n < int(sizeof line) - 100)
+                n += snprintf(line + n, sizeof line - n, " | tex '%s' %ux%u fmt 0x%X mips %u slot %u #%d",
+                              v->tex->label.c_str(), v->tex->width, v->tex->height, unsigned(v->tex->wformat),
+                              v->mipCount, v->slot, id);
             return false;
         });
     }
@@ -979,6 +1037,7 @@ void cap_flush() {
         log("frame capture: %s", path.c_str());
     }
     snap_write(g_capDir);
+    dumps_write(g_capDir);
     g_capText.clear();
     g_capText.shrink_to_fit();
     g_capDir.clear();
