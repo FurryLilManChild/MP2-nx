@@ -899,10 +899,61 @@ index dfbba6023..24bd50ce7 100644
  }
 +} // extern "C"
 diff --git a/lib/gfx/render_worker.cpp b/lib/gfx/render_worker.cpp
-index 85783b60e..cbab58ad8 100644
+index 85783b60e..c0958ddb6 100644
 --- a/lib/gfx/render_worker.cpp
 +++ b/lib/gfx/render_worker.cpp
-@@ -198,7 +198,13 @@ void initialize() {
+@@ -31,6 +31,15 @@ void complete_sync(const std::shared_ptr<SyncState>& sync) {
+   sync->cv.notify_all();
+ }
+ 
++// mp2-nx (the map-speed build): how busy the render worker is and how long the game thread waits for it
++// (a full queue or no free frame slot), read by the deko3d bridge's CPU report (dk_encoder.cpp)
++std::atomic<uint64_t> g_workerBusyNs{0};
++std::atomic<uint64_t> g_gameWaitNs{0};
++uint64_t mono_ns() {
++  return static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
+ void worker_main(std::stop_token token) {
+   g_workerThreadId = std::this_thread::get_id();
+ 
+@@ -46,7 +55,9 @@ void worker_main(std::stop_token token) {
+ 
+     if (item->work) {
+       ZoneScopedN("QueueItem work");
++      const uint64_t t0 = mono_ns();
+       item->work();
++      g_workerBusyNs.fetch_add(mono_ns() - t0, std::memory_order_relaxed);
+     }
+     complete_sync(item->sync);
+     g_pendingItems.fetch_sub(1, std::memory_order_acq_rel);
+@@ -88,7 +99,11 @@ BoundedQueue::BoundedQueue(size_t capacity) : m_capacity(capacity) {}
+ bool BoundedQueue::push(QueueItem item) {
+   ZoneScoped;
+   std::unique_lock lock{m_mutex};
+-  m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
++  if (!m_closed && m_items.size() >= m_capacity) {
++    const uint64_t t0 = mono_ns();
++    m_notFull.wait(lock, [&] { return m_closed || m_items.size() < m_capacity; });
++    g_gameWaitNs.fetch_add(mono_ns() - t0, std::memory_order_relaxed);
++  }
+   if (m_closed) {
+     return false;
+   }
+@@ -139,6 +154,11 @@ FrameSlotPool::FrameSlotPool(size_t slotCount) : m_freeSlots(slotCount, true) {}
+ 
+ size_t FrameSlotPool::acquire() {
+   std::unique_lock lock{m_mutex};
++  const uint64_t t0 = mono_ns();
++  struct WaitTimer {
++    uint64_t t0;
++    ~WaitTimer() { g_gameWaitNs.fetch_add(mono_ns() - t0, std::memory_order_relaxed); }
++  } timer{t0};
+   m_cv.wait(lock, [&] {
+     for (const bool free : m_freeSlots) {
+       if (free) {
+@@ -198,7 +218,13 @@ void initialize() {
    g_pendingItems.store(0, std::memory_order_release);
    g_thread = thread::Thread{{
                                  .name = "Aurora render worker",
@@ -916,6 +967,30 @@ index 85783b60e..cbab58ad8 100644
                              },
                              worker_main};
  }
+@@ -263,7 +289,9 @@ void synchronize() {
+       .sync = sync,
+   });
+   std::unique_lock lock{sync->mutex};
++  const uint64_t t0 = mono_ns();
+   sync->cv.wait(lock, [&] { return sync->complete; });
++  g_gameWaitNs.fetch_add(mono_ns() - t0, std::memory_order_relaxed);
+ }
+ 
+ bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::get_id(); }
+@@ -271,3 +299,13 @@ bool is_worker_thread() noexcept { return g_workerThreadId == std::this_thread::
+ bool is_idle() noexcept { return g_pendingItems.load(std::memory_order_acquire) == 0; }
+ 
+ } // namespace aurora::gfx::render_worker
++
++// mp2-nx (the map-speed build): cumulative nanoseconds; the deko3d bridge's CPU report takes differences
++extern "C" void aurora_render_worker_times(uint64_t* busyNs, uint64_t* gameWaitNs) {
++  if (busyNs != nullptr) {
++    *busyNs = aurora::gfx::render_worker::g_workerBusyNs.load(std::memory_order_relaxed);
++  }
++  if (gameWaitNs != nullptr) {
++    *gameWaitNs = aurora::gfx::render_worker::g_gameWaitNs.load(std::memory_order_relaxed);
++  }
++}
 diff --git a/lib/gfx/scan_peek.cpp b/lib/gfx/scan_peek.cpp
 index de077b862..6bb4da238 100644
 --- a/lib/gfx/scan_peek.cpp

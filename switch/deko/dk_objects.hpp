@@ -87,6 +87,14 @@ struct View {
     uint32_t baseMip = 0, mipCount = 1;
     DkImageView view{};  // pImage set to &tex->image
     uint32_t slot = 0;   // the image descriptor (render worker; 0 until first sampled)
+    // mp2-nx (the scan-visor build): the references the game holds through the API (create, AddRef, Release),
+    // apart from `refs`, which also counts this bridge's holds (encoders until replay, bind groups). While the
+    // game holds one, Dawn's object lives, so the same address from CreateView is the same view, never a reused
+    // address. And what explains a failure: an id, the frames of birth and death, and the last release's source.
+    std::atomic<int32_t> apiRefs{1};
+    uint32_t id = 0;
+    uint64_t bornFrame = 0, diedFrame = 0;
+    const char* lastRelease = "none";
 };
 
 struct Samp {
@@ -134,6 +142,9 @@ void retain(View* v);
 void retain(Samp* s);
 void retain(BindGroup* g);
 void release(View* v);
+// mp2-nx (the scan-visor build): a view handle the bridge has no live shadow for, where it was needed: logs
+// the handle's history (what was created, replaced, released and destroyed at that address)
+void explain_missing_view(WGPUTextureView v, const char* where);
 void release(Samp* s);
 void release(BindGroup* g);
 // mp2-nx: a texture shadow over an image this renderer owns elsewhere (the swapchain's)

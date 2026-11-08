@@ -2,6 +2,28 @@
 
 Newest first.
 
+## 2026-11-07: the map and scan-visor diagnostics build
+
+- Boot-time build results: the stored pipelines were ready 5152 ms after the cache started (10138 before; 3
+  threads, 13867 of 14668 ms shader time in Dawn's CreateShaderModule). The disc open (aurora_dvd_open of the
+  .rvz) took 18.3 s, 3030 to 21380 ms: that is the black screen. The owner: boot speed is low priority now; the boot
+  screen is enough. The crash.txt in the logs was the old one; this quit logged "shutting down" and no crash.
+- Map screen, about 20-36 presents/s on deko3d, smooth on Vulkan (the owner). Captures cap001-003: 6,371 draws in one
+  pass, 9 ms of GPU time; frame uniforms 8+ MiB a frame. So the time is on the CPU. Note: on deko3d, render passes
+  never reach Dawn (the wrappers record them and return), so Dawn's validation is not the cost. This build logs
+  "cpu:" lines (each 3 s window under 55 presents/s): render worker busy time and the game thread's waits for it
+  (Aurora's render_worker.cpp), and in the bridge the recording, the replay by op type (ms, count, us each), the
+  buffer writes (ms, MiB) and the submit lock waits.
+- Scan visor goes black (fine on Vulkan). Its log: "render pass colour slot 0 of 1: no view" (a pass's view handle
+  had no shadow) and bind groups with dead views ("a texture view used after its last release"). Reading: the
+  white-texture fix replaced a view shadow whenever CreateView's description differed from the existing one, also
+  when Dawn's cache handed back a view the game still held; the game's next release then killed the replacement
+  while the game still used the view. Change: View::apiRefs counts the game's own references (create, AddRef,
+  Release); while above 0 the same address is the same view. Diagnostics: a per-handle history (the last 6
+  events: created, handed back, replaced, released by the game, destroyed with the last release's source) printed
+  for any missing or dead view, unknown releases and over-releases; and a log line each time the new rule keeps
+  a view the old rule would have replaced, with what differed.
+
 ## 2026-11-07: the boot-time build (boost from launch, boot helper threads, a boot screen)
 
 - The owner asked to shorten the black screen before the game. The fix build's log: "pipeline cache: 1886 pipelines

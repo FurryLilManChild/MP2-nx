@@ -11,6 +11,8 @@
 #include "dk_bridge.hpp"
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <shared_mutex>
@@ -120,7 +122,56 @@ void destroy(Tex* t) {
     bury(0, t);
 }
 void release_tex(Tex* t);
+
+// ---- mp2-nx (the scan-visor build): the history of each view handle (the last 6 events at its address)
+struct HandleEvent {
+    uint64_t frame = 0;
+    char what[120] = {};
+};
+struct HandleHistory {
+    HandleEvent ev[6];
+    uint32_t next = 0;
+};
+std::mutex g_histMutex;
+std::unordered_map<const void*, HandleHistory> g_viewHistory;
+std::atomic<uint32_t> g_nextViewId{1};
+std::atomic<uint64_t> g_unknownReleases{0}, g_apiNegative{0}, g_heldMismatch{0}, g_missingViews{0};
+
+void view_event(const void* handle, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
+void view_event(const void* handle, const char* fmt, ...) {
+    HandleEvent e;
+    e.frame = R.frame;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(e.what, sizeof e.what, fmt, ap);
+    va_end(ap);
+    std::lock_guard<std::mutex> lock(g_histMutex);
+    HandleHistory& h = g_viewHistory[handle];
+    h.ev[h.next % 6] = e;
+    h.next++;
+}
+
+void log_view_history(const void* handle) {
+    std::lock_guard<std::mutex> lock(g_histMutex);
+    auto it = g_viewHistory.find(handle);
+    if (it == g_viewHistory.end()) {
+        mp2dk::log("objects:   handle %p: no history (never created through the bridge)", handle);
+        return;
+    }
+    const HandleHistory& h = it->second;
+    const uint32_t count = std::min<uint32_t>(h.next, 6);
+    for (uint32_t k = 0; k < count; k++) {
+        const HandleEvent& e = h.ev[(h.next - count + k) % 6];
+        mp2dk::log("objects:   handle %p, frame %llu (now %llu): %s", handle, (unsigned long long)e.frame,
+                   (unsigned long long)R.frame, e.what);
+    }
+}
+
+const char* view_label(const View* v) { return v && v->tex ? v->tex->label.c_str() : "?"; }
+
 void destroy(View* v) {
+    v->diedFrame = R.frame;
+    view_event(v->handle, "view #%u of '%s' destroyed (its last release: %s)", v->id, view_label(v), v->lastRelease);
     if (v->slot) {
         std::lock_guard<std::mutex> lock(g_slotMutex);
         g_freedSlots.push_back(v->slot);
@@ -130,7 +181,7 @@ void destroy(View* v) {
     bury(1, v);
     if (t) release_tex(t);
 }
-void release_view(View* v);
+void release_view(View* v, const char* who);
 void release_sampler(Samp* s);
 void destroy(Samp* s) {
     s->magic = kDead;
@@ -138,7 +189,7 @@ void destroy(Samp* s) {
 }
 void destroy(BindGroup* g) {
     for (auto& e : g->entries) {
-        if (e.view) release_view(e.view);
+        if (e.view) release_view(e.view, "its bind group's end");
         if (e.sampler) release_sampler(e.sampler);
         if (e.buf) mp2dk::buffer_release(e.buf);
     }
@@ -166,7 +217,8 @@ void release_tex(Tex* t) {
         destroy(t);
     }
 }
-void release_view(View* v) {
+void release_view(View* v, const char* who) {
+    v->lastRelease = who;
     if (drop(g_views, v, &ObjectStats::views)) destroy(v);
 }
 void release_sampler(Samp* s) {
@@ -248,7 +300,19 @@ bool dead_use(const char* kind, const char* where, uint32_t magic) {
     return false;
 }
 bool alive(const Tex* t, const char* where) { return !t || t->magic == kAlive || dead_use("texture", where, t->magic); }
-bool alive(const View* v, const char* where) { return !v || v->magic == kAlive || dead_use("texture view", where, v->magic); }
+bool alive(const View* v, const char* where) {
+    if (!v || v->magic == kAlive) return true;
+    static std::atomic<uint32_t> detailed{0};
+    if (detailed.fetch_add(1, std::memory_order_relaxed) < 24) {
+        mp2dk::log("objects: %s: view #%u of '%s' %ux%u, born frame %llu, destroyed frame %llu (now %llu) by its last "
+                   "release (%s), game refs %d, refs %d; the history of its handle:",
+                   where, v->id, view_label(v), v->tex ? v->tex->width : 0, v->tex ? v->tex->height : 0,
+                   (unsigned long long)v->bornFrame, (unsigned long long)v->diedFrame, (unsigned long long)R.frame,
+                   v->lastRelease, v->apiRefs.load(), v->refs.load());
+        log_view_history(v->handle);
+    }
+    return dead_use("texture view", where, v->magic);
+}
 bool alive(const Samp* s, const char* where) { return !s || s->magic == kAlive || dead_use("sampler", where, s->magic); }
 bool alive(const BindGroup* g, const char* where) {
     return !g || g->magic == kAlive || dead_use("bind group", where, g->magic);
@@ -259,7 +323,15 @@ void release(Tex* t) { release_tex(t); }
 void retain(View* v) { v->refs.fetch_add(1, std::memory_order_relaxed); }
 void retain(Samp* s) { s->refs.fetch_add(1, std::memory_order_relaxed); }
 void retain(BindGroup* g) { g->refs.fetch_add(1, std::memory_order_relaxed); }
-void release(View* v) { release_view(v); }
+void release(View* v) { release_view(v, "an encoder after its replay"); }
+
+void explain_missing_view(WGPUTextureView v, const char* where) {
+    const uint64_t n = g_missingViews.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 24 && (n & (n - 1)) != 0) return;
+    mp2dk::log("objects: %s names view handle %p, which has no live shadow here (%llu so far); its history:", where,
+               (void*)v, (unsigned long long)n);
+    log_view_history(v);
+}
 void release(Samp* s) { release_sampler(s); }
 void release(BindGroup* g) { release_bind_group(g); }
 
@@ -574,7 +646,12 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
     if (existing && existing->magic != kAlive) existing = nullptr;
     Tex* t = find(g_textures, texture);
     if (!v || !t) {
-        if (existing) existing->refs.fetch_add(1, std::memory_order_relaxed);
+        if (existing) {
+            existing->refs.fetch_add(1, std::memory_order_relaxed);
+            existing->apiRefs.fetch_add(1, std::memory_order_relaxed);
+            view_event(v, "CreateView of a texture with no shadow came back as view #%u of '%s': taken as the same",
+                       existing->id, view_label(existing));
+        }
         return v;
     }
     auto* view = new View;
@@ -637,17 +714,48 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
             view->view.swizzle[3] = swizzle_of(s->swizzle.a, DkImageSwizzle_Alpha);
         }
     }
-    if (existing && existing->tex == t && existing->baseMip == view->baseMip && existing->mipCount == view->mipCount &&
+    const bool matches =
+        existing && existing->tex == t && existing->baseMip == view->baseMip && existing->mipCount == view->mipCount &&
         existing->view.format == view->view.format && existing->view.type == view->view.type &&
         existing->view.layerOffset == view->view.layerOffset && existing->view.layerCount == view->view.layerCount &&
         existing->view.dsSource == view->view.dsSource &&
-        memcmp(existing->view.swizzle, view->view.swizzle, sizeof view->view.swizzle) == 0) {
-        // a real cache hit (Dawn handed back the same view)
+        memcmp(existing->view.swizzle, view->view.swizzle, sizeof view->view.swizzle) == 0;
+    // mp2-nx (the scan-visor build): while the game still holds the existing view (apiRefs), Dawn's object is
+    // alive, so this is Dawn's cache handing it back: the same view, whatever the comparison says. The
+    // white-texture fix replaced it whenever the comparison failed, and the game's next release then killed the
+    // replacement while the game still held the view (the scan visor's passes with no colour target, its bind
+    // groups' dead views: log of 2026-11-07). Logged, with what differed, to see why the comparison failed.
+    const int32_t held = existing ? existing->apiRefs.load(std::memory_order_relaxed) : 0;
+    if (existing && (matches || held > 0)) {
+        if (!matches) {
+            const uint64_t n = g_heldMismatch.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 24 || (n & (n - 1)) == 0)
+                mp2dk::log("objects: Dawn handed back view #%u of '%s' %ux%u, which the game still holds (game refs %d), for "
+                           "a CreateView that differs (%llu so far): kept as the same view (the old rule replaced it). "
+                           "Old: texture shadow %p, mips %u+%u, format %d, type %d, layers %u+%u; new: texture shadow %p "
+                           "'%s', mips %u+%u, format %d, type %d, layers %u+%u",
+                           existing->id, view_label(existing), existing->tex ? existing->tex->width : 0,
+                           existing->tex ? existing->tex->height : 0, held, (unsigned long long)n, (void*)existing->tex,
+                           existing->baseMip, existing->mipCount, int(existing->view.format), int(existing->view.type),
+                           existing->view.layerOffset, existing->view.layerCount, (void*)t, t->label.c_str(),
+                           view->baseMip, view->mipCount, int(view->view.format), int(view->view.type),
+                           view->view.layerOffset, view->view.layerCount);
+        }
+        view_event(v, "CreateView came back as view #%u of '%s' (%s; game refs %d)", existing->id, view_label(existing),
+                   matches ? "a cache hit" : "held by the game, though it differs", held + 1);
         existing->refs.fetch_add(1, std::memory_order_relaxed);
+        existing->apiRefs.fetch_add(1, std::memory_order_relaxed);
         release_tex(t);
         delete view;
         return v;
     }
+    view->id = g_nextViewId.fetch_add(1, std::memory_order_relaxed);
+    view->bornFrame = R.frame;
+    if (existing)
+        view_event(v, "new view #%u of '%s' %ux%u replaced view #%u of '%s' (no game refs left; refs %d)", view->id,
+                   t->label.c_str(), t->width, t->height, existing->id, view_label(existing), existing->refs.load());
+    else
+        view_event(v, "new view #%u of '%s' %ux%u", view->id, t->label.c_str(), t->width, t->height);
     if (existing) {
         const uint64_t n = g_reusedViews.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 20 || (n & (n - 1)) == 0)
@@ -665,13 +773,36 @@ WGPUTextureView __wrap_wgpuTextureCreateView(WGPUTexture texture, WGPUTextureVie
 
 void __wrap_wgpuTextureViewAddRef(WGPUTextureView view) {
     if (R.device)
-        if (View* v = find(g_views, view)) v->refs.fetch_add(1, std::memory_order_relaxed);
+        if (View* v = find(g_views, view)) {
+            v->refs.fetch_add(1, std::memory_order_relaxed);
+            v->apiRefs.fetch_add(1, std::memory_order_relaxed);
+        }
     __real_wgpuTextureViewAddRef(view);
 }
 
 void __wrap_wgpuTextureViewRelease(WGPUTextureView view) {
-    if (R.device)
-        if (View* v = find(g_views, view)) release_view(v);
+    if (R.device) {
+        if (View* v = find(g_views, view)) {
+            const int32_t api = v->apiRefs.fetch_sub(1, std::memory_order_relaxed) - 1;
+            view_event(view, "the game released view #%u of '%s' (game refs now %d, refs before %d)", v->id,
+                       view_label(v), api, v->refs.load());
+            if (api < 0) {
+                const uint64_t n = g_apiNegative.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (n <= 16)
+                    mp2dk::log("objects: the game released view #%u of '%s' more often than it took it (game refs %d)",
+                               v->id, view_label(v), api);
+            }
+            release_view(v, "the game's release");
+        } else {
+            const uint64_t n = g_unknownReleases.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 16 || (n & (n - 1)) == 0) {
+                mp2dk::log("objects: the game released view handle %p, which has no live shadow here (%llu so far); "
+                           "its history:",
+                           (void*)view, (unsigned long long)n);
+                log_view_history(view);
+            }
+        }
+    }
     __real_wgpuTextureViewRelease(view);
 }
 
@@ -757,6 +888,7 @@ WGPUBindGroup __wrap_wgpuDeviceCreateBindGroup(WGPUDevice device, WGPUBindGroupD
         entry.offset = e.offset;
         entry.size = e.size;
         entry.view = find(g_views, e.textureView);
+        if (!entry.view && e.textureView) explain_missing_view(e.textureView, "a new bind group");  // (scan-visor build)
         entry.sampler = find(g_samplers, e.sampler);
         if ((entry.buf = mp2dk::find_buffer(e.buffer))) mp2dk::buffer_retain(entry.buf);
         for (size_t k = 0; k < dynamic.size(); k++)

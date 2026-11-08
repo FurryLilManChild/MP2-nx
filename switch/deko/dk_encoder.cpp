@@ -36,6 +36,7 @@
 
 extern "C" {
 const char* aurora_frame_capture_dir(void);  // Aurora's encoding.cpp (mp2-nx frame capture)
+void aurora_render_worker_times(uint64_t* busyNs, uint64_t* gameWaitNs);  // Aurora's render_worker.cpp (mp2-nx)
 WGPUCommandEncoder __real_wgpuDeviceCreateCommandEncoder(WGPUDevice, WGPUCommandEncoderDescriptor const*);
 WGPURenderPassEncoder __real_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncoder, WGPURenderPassDescriptor const*);
 WGPUComputePassEncoder __real_wgpuCommandEncoderBeginComputePass(WGPUCommandEncoder, WGPUComputePassDescriptor const*);
@@ -89,6 +90,34 @@ using aurora::gfx::dk::Tex;
 using aurora::gfx::dk::View;
 namespace dko = aurora::gfx::dk;
 using swdk::R;
+
+// ---- mp2-nx (the map-speed build): where the CPU time of a frame goes
+// The map screen draws 6,371 draws a frame (capture cap001, 2026-11-07) that the GPU finishes in 9 ms, yet runs
+// near 20 fps on deko3d and smoothly on Vulkan: the time is on the CPU, and this says where. Counted in system
+// ticks (19.2 MHz): the wrappers (recording, on the render worker), the replay by op type (at each submit, on
+// whichever thread submits), the queue's buffer writes (copies into the upload ring) and the waits for the submit
+// lock; with Aurora's render worker busy time and the game thread's waits for the worker
+// (aurora_render_worker_times). perf_tick (each present) logs the per-frame averages of every 3 s window below
+// 55 presents/s, and one of every 30 s otherwise. MP2DK_PERF=0 turns the line off.
+struct Perf {
+    std::atomic<uint64_t> rec{0}, recCalls{0}, write{0}, writeBytes{0}, lockWait{0}, replay{0}, queueOps{0};
+    std::atomic<uint64_t> op[17] = {};
+    std::atomic<uint64_t> opCount[17] = {};
+};
+Perf g_perf;
+struct PerfScope {
+    std::atomic<uint64_t>& to;
+    uint64_t t0 = armGetSystemTick();
+    explicit PerfScope(std::atomic<uint64_t>& t) : to(t) {}
+    ~PerfScope() { to.fetch_add(armGetSystemTick() - t0, std::memory_order_relaxed); }
+};
+struct RecScope {
+    uint64_t t0 = armGetSystemTick();
+    ~RecScope() {
+        g_perf.rec.fetch_add(armGetSystemTick() - t0, std::memory_order_relaxed);
+        g_perf.recCalls.fetch_add(1, std::memory_order_relaxed);
+    }
+};
 
 namespace {
 
@@ -1138,7 +1167,17 @@ void cap_flush() {
 }
 
 void replay(Replay& r, Enc* e) {
+    uint64_t opStart = armGetSystemTick();
+    int lastType = -1;
     for (const Op& op : e->ops) {
+        // (each op's time runs from its start to the next op's start)
+        const uint64_t now = armGetSystemTick();
+        if (lastType >= 0) {
+            g_perf.op[lastType].fetch_add(now - opStart, std::memory_order_relaxed);
+            g_perf.opCount[lastType].fetch_add(1, std::memory_order_relaxed);
+        }
+        opStart = now;
+        lastType = int(op.type);
         note(kOpNotes[int(op.type)]);
         switch (op.type) {
         case OpType::BeginPass:
@@ -1279,6 +1318,10 @@ void replay(Replay& r, Enc* e) {
             break;
         }
     }
+    if (lastType >= 0) {
+        g_perf.op[lastType].fetch_add(armGetSystemTick() - opStart, std::memory_order_relaxed);
+        g_perf.opCount[lastType].fetch_add(1, std::memory_order_relaxed);
+    }
     end_pass(r);  // (a pass Aurora never ended)
 }
 
@@ -1382,7 +1425,11 @@ void submit_cmds_locked(Enc* const* encs, size_t count, const char* why) {
         g_immediatesFrameId = R.frame;
     }
     r.immediates = g_immediatesFrame;
-    replay_queue_ops(r);
+    PerfScope replayTime(g_perf.replay);
+    {
+        PerfScope q(g_perf.queueOps);
+        replay_queue_ops(r);
+    }
     for (size_t i = 0; i < count; i++)
         if (encs[i]) replay(r, encs[i]);
     note("submit: fence and send");
@@ -1421,6 +1468,7 @@ Op& add(Enc* e, OpType t) {
 
 View* hold(Enc* e, WGPUTextureView v) {
     View* view = dko::find_view(v);
+    if (!view && v) dko::explain_missing_view(v, "a render pass being recorded");  // (the scan-visor build)
     if (view && !dko::alive(view, "recorded in a pass")) view = nullptr;
     if (view) {
         dko::retain(view);
@@ -1673,6 +1721,83 @@ void shot_take_locked(const DkImage& image, uint32_t w, uint32_t h) {
 bool cycle_blank_resolved() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeBlankResolved; }
 bool cycle_discard_rules() { return g_cycleOn && g_mode.load(std::memory_order_relaxed) == kModeDiscardRules; }
 void count_discarded_sample() { g_discardSamples.fetch_add(1, std::memory_order_relaxed); }
+// mp2-nx (the map-speed build): see Perf above. At each present (dk_surface.cpp), outside the submit lock.
+void perf_tick() {
+    static const bool kOn = swdk::env_flag("MP2DK_PERF", true);
+    if (!kOn) return;
+    struct Snap {
+        uint64_t t = 0, frames = 0, draws = 0, rec = 0, recCalls = 0, write = 0, writeBytes = 0, lockWait = 0;
+        uint64_t replay = 0, queueOps = 0, busy = 0, gameWait = 0;
+        uint64_t op[17] = {}, opCount[17] = {};
+    };
+    static Snap last;
+    static uint64_t lastLogged = 0;
+    static uint32_t lines = 0;
+    static uint64_t frames = 0;
+    frames++;
+    const uint64_t now = armGetSystemTick();
+    if (last.t == 0) {
+        last.t = now;
+        last.frames = frames;
+        return;
+    }
+    const uint64_t span = now - last.t;
+    if (armTicksToNs(span) < 3'000'000'000ull) return;
+    Snap cur;
+    cur.t = now;
+    cur.frames = frames;
+    cur.draws = g_totals.draws;
+    cur.rec = g_perf.rec.load();
+    cur.recCalls = g_perf.recCalls.load();
+    cur.write = g_perf.write.load();
+    cur.writeBytes = g_perf.writeBytes.load();
+    cur.lockWait = g_perf.lockWait.load();
+    cur.replay = g_perf.replay.load();
+    cur.queueOps = g_perf.queueOps.load();
+    aurora_render_worker_times(&cur.busy, &cur.gameWait);
+    for (int i = 0; i < 17; i++) {
+        cur.op[i] = g_perf.op[i].load();
+        cur.opCount[i] = g_perf.opCount[i].load();
+    }
+    const double n = double(cur.frames - last.frames);
+    const double fps = n * 1e9 / double(armTicksToNs(span));
+    const bool slow = fps < 55.0;
+    const bool periodic = armTicksToNs(now - lastLogged) >= 30'000'000'000ull;
+    if ((slow || periodic) && lines < 400) {
+        lines++;
+        lastLogged = now;
+        auto ms = [&](uint64_t a, uint64_t b) { return double(armTicksToNs(a - b)) / 1e6 / n; };
+        auto msn = [&](uint64_t ns) { return double(ns) / 1e6 / n; };
+        const double frameMs = double(armTicksToNs(span)) / 1e6 / n;
+        // the replay's top five op types
+        int order[17];
+        for (int i = 0; i < 17; i++) order[i] = i;
+        std::sort(order, order + 17, [&](int a, int b) { return cur.op[a] - last.op[a] > cur.op[b] - last.op[b]; });
+        char ops[512];
+        int len = 0;
+        for (int k = 0; k < 5; k++) {
+            const int i = order[k];
+            if (cur.op[i] == last.op[i]) break;
+            const double opMs = ms(cur.op[i], last.op[i]);
+            const double perOp = double(armTicksToNs(cur.op[i] - last.op[i])) /
+                                 double(std::max<uint64_t>(cur.opCount[i] - last.opCount[i], 1)) / 1000.0;
+            len += snprintf(ops + len, sizeof ops - size_t(len), "%s%s %.2f ms (%.0f a frame, %.1f us each)",
+                            k ? ", " : "", kOpNotes[i] + 8, opMs, double(cur.opCount[i] - last.opCount[i]) / n, perOp);
+            if (len >= int(sizeof ops)) break;
+        }
+        if (len == 0) snprintf(ops, sizeof ops, "nothing");
+        log("cpu: %.1f fps (%.2f ms a frame, %.0f draws); render worker busy %.2f ms, the game thread waited for it "
+            "%.2f ms; in the bridge: recording %.2f ms (%.0f calls), replay %.2f ms (queue writes %.2f ms; %s), buffer "
+            "writes %.2f ms (%.2f MiB), submit lock waits %.2f ms (per frame)",
+            fps, frameMs, double(cur.draws - last.draws) / n, msn(cur.busy - last.busy), msn(cur.gameWait - last.gameWait),
+            ms(cur.rec, last.rec), double(cur.recCalls - last.recCalls) / n, ms(cur.replay, last.replay),
+            ms(cur.queueOps, last.queueOps), ops, ms(cur.write, last.write),
+            double(cur.writeBytes - last.writeBytes) / n / 1048576.0, ms(cur.lockWait, last.lockWait));
+        if (lines == 400) log("cpu: 400 lines; no more this session");
+    }
+    last = cur;
+}
+
 void capture_flush() {  // (dk_surface.cpp, at every present)
     g_fullDrawsLast = g_fullDraws;
     g_fullDraws = 0;
@@ -1726,6 +1851,7 @@ void __wrap_wgpuCommandBufferRelease(WGPUCommandBuffer b) {
 
 WGPURenderPassEncoder __wrap_wgpuCommandEncoderBeginRenderPass(WGPUCommandEncoder e, WGPURenderPassDescriptor const* d) {
     if (!on()) return __real_wgpuCommandEncoderBeginRenderPass(e, d);
+    RecScope rec_;
     Enc* enc = enc_of(e);
     PassDesc p;
     if (d->label.data) {
@@ -1775,6 +1901,7 @@ void __wrap_wgpuRenderPassEncoderRelease(WGPURenderPassEncoder p) {
 
 void __wrap_wgpuRenderPassEncoderSetPipeline(WGPURenderPassEncoder p, WGPURenderPipeline pipeline) {
     if (!on()) return __real_wgpuRenderPassEncoderSetPipeline(p, pipeline);
+    RecScope rec_;
     Enc* enc = pass_of(p)->enc;
     RPipe* pipe = find_render_pipeline(pipeline);
     if (pipe) {
@@ -1787,6 +1914,7 @@ void __wrap_wgpuRenderPassEncoderSetPipeline(WGPURenderPassEncoder p, WGPURender
 void __wrap_wgpuRenderPassEncoderSetBindGroup(WGPURenderPassEncoder p, uint32_t index, WGPUBindGroup group,
                                               size_t dynCount, uint32_t const* dyn) {
     if (!on()) return __real_wgpuRenderPassEncoderSetBindGroup(p, index, group, dynCount, dyn);
+    RecScope rec_;
     Enc* enc = pass_of(p)->enc;
     BindGroup* g = dko::find_bind_group(group);
     if (g && !dko::alive(g, "set on a pass")) g = nullptr;
@@ -1805,6 +1933,7 @@ void __wrap_wgpuRenderPassEncoderSetBindGroup(WGPURenderPassEncoder p, uint32_t 
 void __wrap_wgpuRenderPassEncoderSetVertexBuffer(WGPURenderPassEncoder p, uint32_t slot, WGPUBuffer buffer,
                                                  uint64_t offset, uint64_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetVertexBuffer(p, slot, buffer, offset, size);
+    RecScope rec_;
     Enc* enc = pass_of(p)->enc;
     Op& op = add(enc, OpType::SetVertexBuffer);
     op.p = buffer ? hold(enc, buffer) : nullptr;
@@ -1816,6 +1945,7 @@ void __wrap_wgpuRenderPassEncoderSetVertexBuffer(WGPURenderPassEncoder p, uint32
 void __wrap_wgpuRenderPassEncoderSetIndexBuffer(WGPURenderPassEncoder p, WGPUBuffer buffer, WGPUIndexFormat format,
                                                 uint64_t offset, uint64_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetIndexBuffer(p, buffer, format, offset, size);
+    RecScope rec_;
     Enc* enc = pass_of(p)->enc;
     Op& op = add(enc, OpType::SetIndexBuffer);
     op.p = hold(enc, buffer);
@@ -1827,6 +1957,7 @@ void __wrap_wgpuRenderPassEncoderSetIndexBuffer(WGPURenderPassEncoder p, WGPUBuf
 void __wrap_wgpuRenderPassEncoderDraw(WGPURenderPassEncoder p, uint32_t vertexCount, uint32_t instanceCount,
                                       uint32_t firstVertex, uint32_t firstInstance) {
     if (!on()) return __real_wgpuRenderPassEncoderDraw(p, vertexCount, instanceCount, firstVertex, firstInstance);
+    RecScope rec_;
     Op& op = add(pass_of(p)->enc, OpType::Draw);
     op.u[0] = vertexCount;
     op.u[1] = instanceCount;
@@ -1838,6 +1969,7 @@ void __wrap_wgpuRenderPassEncoderDrawIndexed(WGPURenderPassEncoder p, uint32_t i
                                              uint32_t firstIndex, int32_t baseVertex, uint32_t firstInstance) {
     if (!on())
         return __real_wgpuRenderPassEncoderDrawIndexed(p, indexCount, instanceCount, firstIndex, baseVertex, firstInstance);
+    RecScope rec_;
     Op& op = add(pass_of(p)->enc, OpType::DrawIndexed);
     op.u[0] = indexCount;
     op.u[1] = instanceCount;
@@ -1849,6 +1981,7 @@ void __wrap_wgpuRenderPassEncoderDrawIndexed(WGPURenderPassEncoder p, uint32_t i
 void __wrap_wgpuRenderPassEncoderSetViewport(WGPURenderPassEncoder p, float x, float y, float w, float h, float minDepth,
                                              float maxDepth) {
     if (!on()) return __real_wgpuRenderPassEncoderSetViewport(p, x, y, w, h, minDepth, maxDepth);
+    RecScope rec_;
     Op& op = add(pass_of(p)->enc, OpType::Viewport);
     op.f[0] = x;
     op.f[1] = y;
@@ -1860,6 +1993,7 @@ void __wrap_wgpuRenderPassEncoderSetViewport(WGPURenderPassEncoder p, float x, f
 
 void __wrap_wgpuRenderPassEncoderSetScissorRect(WGPURenderPassEncoder p, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!on()) return __real_wgpuRenderPassEncoderSetScissorRect(p, x, y, w, h);
+    RecScope rec_;
     Op& op = add(pass_of(p)->enc, OpType::Scissor);
     op.u[0] = x;
     op.u[1] = y;
@@ -1869,6 +2003,7 @@ void __wrap_wgpuRenderPassEncoderSetScissorRect(WGPURenderPassEncoder p, uint32_
 
 void __wrap_wgpuRenderPassEncoderSetBlendConstant(WGPURenderPassEncoder p, WGPUColor const* c) {
     if (!on()) return __real_wgpuRenderPassEncoderSetBlendConstant(p, c);
+    RecScope rec_;
     Op& op = add(pass_of(p)->enc, OpType::BlendConstant);
     op.f[0] = float(c->r);
     op.f[1] = float(c->g);
@@ -1878,6 +2013,7 @@ void __wrap_wgpuRenderPassEncoderSetBlendConstant(WGPURenderPassEncoder p, WGPUC
 
 void __wrap_wgpuRenderPassEncoderSetImmediates(WGPURenderPassEncoder p, uint32_t offset, void const* data, size_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetImmediates(p, offset, data, size);
+    RecScope rec_;
     Enc* enc = pass_of(p)->enc;
     const uint32_t at = push_words(enc, static_cast<const uint8_t*>(data), size);
     Op& op = add(enc, OpType::Immediates);
@@ -2009,12 +2145,16 @@ void __wrap_wgpuCommandEncoderResolveQuerySet(WGPUCommandEncoder e, WGPUQuerySet
 // ---- the queue
 void __wrap_wgpuQueueSubmit(WGPUQueue queue, size_t count, WGPUCommandBuffer const* commands) {
     if (!on()) return __real_wgpuQueueSubmit(queue, count, commands);
+    const uint64_t w0 = armGetSystemTick();
     std::lock_guard<std::mutex> lock(g_submitMutex);
+    g_perf.lockWait.fetch_add(armGetSystemTick() - w0, std::memory_order_relaxed);
     submit_cmds_locked(reinterpret_cast<Enc* const*>(commands), count, "a queue submit");
 }
 
 void __wrap_wgpuQueueWriteBuffer(WGPUQueue queue, WGPUBuffer buffer, uint64_t offset, void const* data, size_t size) {
     if (!on()) return __real_wgpuQueueWriteBuffer(queue, buffer, offset, data, size);
+    PerfScope writeTime(g_perf.write);
+    g_perf.writeBytes.fetch_add(size, std::memory_order_relaxed);
     Buf* b = find_buffer(buffer);
     if (!b || size == 0) return;
     QueueOp q;
