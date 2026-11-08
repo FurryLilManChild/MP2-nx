@@ -49,6 +49,13 @@ extern "C" bool mp2nx_dk_fell_back(void);
 extern "C" bool mp2nx_dk_chosen(void);
 extern "C" void mp2nx_dk_set_chosen(bool on);
 extern "C" const char* mp2nx_dk_cycle_label(void);
+extern "C" const char mp2nx_build_id[];      // <build>/mp2nx_build_id.c
+extern "C" const char mp2nx_build_label[];
+extern "C" unsigned const mp2nx_build_number;
+extern "C" const char* mp2nx_log_status(void);  // startup.cpp
+extern "C" bool mp2nx_logs_ok(void);
+// CMapArea.cpp (the map A/B build): true while the map is open, with the path in use and the map's draw time
+extern "C" bool mp2nx_map_ab_state(int* native, float* drawMs) __attribute__((weak));
 #endif
 
 namespace PortDebug::SwitchMenu {
@@ -800,6 +807,12 @@ std::vector< Row > BuildRows(int page) {
                     },
                     nullptr});
 #endif
+    {
+      char build[48];
+      std::snprintf(build, sizeof(build), "%u", mp2nx_build_number);
+      rows.push_back({"Build", build, mp2nx_build_id, nullptr, nullptr});
+    }
+    rows.push_back({"Logs", mp2nx_logs_ok() ? "OK" : "Problem", mp2nx_log_status(), nullptr, nullptr});
     rows.push_back({MP2NX_APP_NAME, "Echoes Unbound on Switch", "", nullptr, nullptr, false});
     break;
   }
@@ -929,6 +942,19 @@ void DrawAlways() {
     dl->AddText(font, small, pos, Col(0.4f, 1, 1), test);
   }
 #endif
+  // the map A/B build: which map path is drawing, live, so a test shows the switch without a log
+  if (mp2nx_map_ab_state != nullptr) {
+    int native = 0;
+    float drawMs = 0.f;
+    if (mp2nx_map_ab_state(&native, &drawMs)) {
+      char buf[96];
+      std::snprintf(buf, sizeof(buf), "Map test: %s path, %.0f fps, map draw %.1f ms", native ? "NATIVE" : "OLD (GX)",
+                    static_cast< double >(sFps), static_cast< double >(drawMs));
+      const ImVec2 pos(display.y * 0.02f, display.y - display.y * 0.02f - small);
+      dl->AddText(font, small, ImVec2(pos.x + 2, pos.y + 2), Col(0, 0, 0, 0.9f), buf);
+      dl->AddText(font, small, pos, native ? Col(0.4f, 1, 0.4f) : Col(1, 0.6f, 0.3f), buf);
+    }
+  }
   if (!sToast.empty() && now < sToastUntil) {
     const float w = TextWidth(font, small, sToast);
     const ImVec2 pos((display.x - w) * 0.5f, display.y * 0.88f);

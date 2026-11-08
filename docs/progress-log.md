@@ -2,6 +2,23 @@
 
 Newest first.
 
+## 2026-11-08: build stamps, checked logging, a live map A/B label
+
+- The owner ran the A/B map build (his SD copy: 72,965,203 bytes, the same as the build; checked here: same SHA-256,
+  the A/B strings in it). Both logs he copied (err.log and err.prev.log) have the first native build's
+  startup line ("map: native map surfaces on (MP2_NATIVE_MAP)"), which the A/B build does not contain, and none
+  of the A/B or second "frame:" lines. The cause is not known. The old open_logs ignored every failure: a log
+  it could not move or replace stayed on the SD card looking like the newest run's, and nothing showed which
+  build had written a log. That is the logging's fault, fixed here.
+- Build stamp (switch/cmake/mp2nx_build_id.cmake, run on every build): a build number, the build time and the
+  commit; the first line of both logs, on the boot screen, and in the Switch menu (System > Build).
+- open_logs checks every step: a log that cannot be moved to .prev.log is deleted; a stream that cannot open its
+  file falls back to the app folder, then the SD root; the result is on the boot screen ("LOGS OK" or a red
+  warning) and in System > Logs; logs/last-run.txt (closed at once) records the build, the start time and each
+  step. mp2nx_end_process flushes the logs.
+- The map A/B shows itself: with the map open, a bottom-left label gives the path in use, the fps and the map's
+  draw time, so a test shows the switching without a log.
+
 ## 2026-11-08: the native map is slower; diagnostics build
 
 - Native map log (deko3d, heavy view): 18.8 fps, 53 ms a frame, 800 draws (6,400 before); "map: native batch:

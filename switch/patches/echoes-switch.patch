@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..53b70f3c6 100644
+index ef1c8c60d..d8d537a80 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..53b70f3c6 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,65 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,74 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -55,6 +55,15 @@ index ef1c8c60d..53b70f3c6 100644
 +        target_compile_definitions(mp_port_audio PRIVATE MP2NX_DEKO3D=1)
 +    endif()
 +    set_target_properties(metroid_prime2_port PROPERTIES OUTPUT_NAME ${MP2NX_APP_NAME})
++    # mp2-nx: the build stamp, written again on every build (switch/cmake/mp2nx_build_id.cmake)
++    add_custom_target(mp2nx_build_id ALL
++        COMMAND ${CMAKE_COMMAND} -DOUT=${CMAKE_BINARY_DIR}/mp2nx_build_id.c
++            -DNUMBER_FILE=${CMAKE_BINARY_DIR}/mp2nx_build_number.txt -DROOT=${MP2NX_ROOT}
++            -P ${MP2NX_ROOT}/switch/cmake/mp2nx_build_id.cmake
++        BYPRODUCTS ${CMAKE_BINARY_DIR}/mp2nx_build_id.c
++        COMMENT "mp2-nx build stamp")
++    target_sources(metroid_prime2_port PRIVATE ${CMAKE_BINARY_DIR}/mp2nx_build_id.c)
++    add_dependencies(metroid_prime2_port mp2nx_build_id)
 +    # Linux pulls in htons/htonl through other headers; Horizon's libc needs arpa/inet.h.
 +    set_source_files_properties(platform/port_console.cpp PROPERTIES COMPILE_OPTIONS "-include;arpa/inet.h")
 +    # SQLite: no mmap or shared-memory WAL on Horizon, and no extension loading.
@@ -502,7 +511,7 @@ index 468523c04..29ccf33a4 100644
    gResFactoryUnknown = 2;
  }
 diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
-index 3d4fe910a..05ffe091c 100644
+index 3d4fe910a..eb41b2a3d 100644
 --- a/src/MetroidPrime/CMapArea.cpp
 +++ b/src/MetroidPrime/CMapArea.cpp
 @@ -15,6 +15,7 @@
@@ -513,7 +522,7 @@ index 3d4fe910a..05ffe091c 100644
  #include "Kyoto/Streams/CInputStream.hpp"
  #include "Kyoto/Streams/CMemoryStreamOut.hpp"
  
-@@ -542,3 +543,413 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
+@@ -542,3 +543,431 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
  #endif
    return rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
  }
@@ -901,9 +910,27 @@ index 3d4fe910a..05ffe091c 100644
 +#endif
 +
 +#ifdef TARGET_PC
++// The map A/B label (switch_menu.cpp): the path in use and the map's draw time, smoothed over about 0.3 s.
++namespace {
++float gLabelDrawMs = 0.f;
++unsigned long long gLabelSeen = 0;
++}  // namespace
++
++extern "C" bool mp2nx_map_ab_state(int* native, float* drawMs) {
++  if (gLabelSeen == 0 || native_now() - gLabelSeen > 500000000ull) {
++    return false;
++  }
++  *native = (gPinned >= 0 ? gPinned == 1 : gAbNative) ? 1 : 0;
++  *drawMs = gLabelDrawMs;
++  return true;
++}
++
 +void CMapArea::NativeFrameDone(unsigned long long drawNs) {
 +  static bool lastNative = true;
 +  const bool native = gPinned >= 0 ? gPinned == 1 : gAbNative;
++  gLabelDrawMs = gLabelSeen == 0 || native != lastNative ? float(drawNs / 1e6)
++                                                         : gLabelDrawMs * 0.9f + float(drawNs / 1e6) * 0.1f;
++  gLabelSeen = native_now();
 +  if (native != lastNative) {
 +    gStats = NativeStats();  // (a window holds one path only)
 +    gStatsWindow = 0;

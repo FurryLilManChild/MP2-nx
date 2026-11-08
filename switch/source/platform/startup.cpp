@@ -24,6 +24,10 @@ extern "C" void mp2nx_sqlite_setup(void);
 extern "C" void mp2nx_install_suspend_hook(void);
 extern "C" void mp2nx_load_boost(int reason, int on);                 // load_boost.cpp
 extern "C" void mp2nx_boot_mark(const char* what, const char* stage);  // load_boost.cpp
+extern "C" const char mp2nx_build_id[];                                 // <build>/mp2nx_build_id.c
+
+#include <cerrno>
+#include <ctime>
 
 extern "C" {
 
@@ -43,6 +47,8 @@ u32 __nx_applet_exit_mode = 0;
 
 // Ends the process through AM (ISelfController::Exit); the kernel ends it if AM has not within 10 s.
 extern "C" [[noreturn]] void mp2nx_end_process(void) {
+  std::fflush(stdout);  // (the log flusher writes every 200 ms; this keeps the last lines)
+  std::fflush(stderr);
   const AppletType type = appletGetAppletType();
   if (type == AppletType_Application || type == AppletType_SystemApplication) {
     Service* self = appletGetServiceSession_SelfController();
@@ -62,21 +68,110 @@ LoaderReturnFn sLoaderReturn = nullptr;
 
 namespace {
 
+// The log status (the build-stamp build). The owner (2026-11-08): two runs of the A/B build left logs that the
+// A/B build cannot have written, and the old open_logs could not say why: it ignored every failure, so a
+// log it could not replace stayed on the SD card looking like this run's. Now every step is checked; a
+// log that cannot be replaced is deleted, a stream that cannot open its usual file goes to a fallback
+// file, the result is on the boot screen and in the Switch menu (System > Logs), and last-run.txt
+// (written and closed at once) records the build and each step even if the streams fail later.
+char sLogStatus[160] = "not opened";
+bool sLogsOk = false;
+char sLogSteps[1024] = "";
+
+void log_step(const char* what, int rc) {
+  const size_t used = std::strlen(sLogSteps);
+  if (used + 2 >= sizeof sLogSteps) return;
+  if (rc == 0) {
+    std::snprintf(sLogSteps + used, sizeof sLogSteps - used, "  %s: ok\n", what);
+  } else {
+    const int e = errno;
+    std::snprintf(sLogSteps + used, sizeof sLogSteps - used, "  %s: FAILED (errno %d, %s)\n", what, e,
+                  std::strerror(e));
+  }
+}
+
+bool exists(const char* path) {
+  struct stat st{};
+  return stat(path, &st) == 0;
+}
+
+// Keeps the previous run's log as *.prev.log; a log that cannot be moved is deleted, so it cannot pass
+// for this run's.
+void rotate(const char* cur, const char* prev, const char* name) {
+  char what[96];
+  if (exists(prev)) {
+    std::snprintf(what, sizeof what, "delete the old %s.prev.log", name);
+    log_step(what, remove(prev));
+  }
+  if (exists(cur)) {
+    std::snprintf(what, sizeof what, "keep the last %s.log as .prev.log", name);
+    log_step(what, rename(cur, prev));
+    if (exists(cur)) {
+      std::snprintf(what, sizeof what, "delete the last %s.log (it could not be moved)", name);
+      log_step(what, remove(cur));
+    }
+  }
+}
+
+// Points a stream at its log, or at the fallbacks; returns the file used, or nullptr.
+const char* open_stream(FILE* stream, const char* const* paths, const char* name) {
+  for (const char* const* p = paths; *p != nullptr; ++p) {
+    char what[160];
+    std::snprintf(what, sizeof what, "open %s for %s", *p, name);
+    if (std::freopen(*p, "w", stream) != nullptr) {
+      log_step(what, 0);
+      std::setvbuf(stream, nullptr, _IOLBF, 0);
+      return *p;
+    }
+    log_step(what, -1);
+  }
+  return nullptr;
+}
+
 // One file per stream: Horizon refuses a second write handle on an open file, so a
 // shared file would silently lose one of them.
 void open_logs() {
-  mkdir(MP2NX_DIR, 0777);
-  mkdir(MP2NX_DIR "/logs", 0777);
-  // The previous run's logs are kept as *.prev.log.
-  remove(MP2NX_DIR "/logs/mp2-nx.prev.log");
-  rename(MP2NX_DIR "/logs/mp2-nx.log", MP2NX_DIR "/logs/mp2-nx.prev.log");
-  remove(MP2NX_DIR "/logs/mp2-nx.err.prev.log");
-  rename(MP2NX_DIR "/logs/mp2-nx.err.log", MP2NX_DIR "/logs/mp2-nx.err.prev.log");
-  if (std::freopen(MP2NX_DIR "/logs/mp2-nx.log", "w", stdout) != nullptr) {
-    std::setvbuf(stdout, nullptr, _IOLBF, 0);
+  log_step("make " MP2NX_DIR, mkdir(MP2NX_DIR, 0777) == 0 || errno == EEXIST ? 0 : -1);
+  log_step("make " MP2NX_DIR "/logs", mkdir(MP2NX_DIR "/logs", 0777) == 0 || errno == EEXIST ? 0 : -1);
+  rotate(MP2NX_DIR "/logs/mp2-nx.log", MP2NX_DIR "/logs/mp2-nx.prev.log", "mp2-nx");
+  rotate(MP2NX_DIR "/logs/mp2-nx.err.log", MP2NX_DIR "/logs/mp2-nx.err.prev.log", "mp2-nx.err");
+  static const char* const kOut[] = {MP2NX_DIR "/logs/mp2-nx.log", MP2NX_DIR "/mp2-nx.log",
+                                     "sdmc:/" MP2NX_APP_NAME ".log", nullptr};
+  static const char* const kErr[] = {MP2NX_DIR "/logs/mp2-nx.err.log", MP2NX_DIR "/mp2-nx.err.log",
+                                     "sdmc:/" MP2NX_APP_NAME ".err.log", nullptr};
+  const char* out = open_stream(stdout, kOut, "stdout");
+  const char* err = open_stream(stderr, kErr, "stderr");
+  sLogsOk = out == kOut[0] && err == kErr[0];
+  if (sLogsOk) {
+    std::snprintf(sLogStatus, sizeof sLogStatus, "OK (" MP2NX_DIR "/logs)");
+  } else if (err != nullptr) {
+    std::snprintf(sLogStatus, sizeof sLogStatus, "PROBLEM: the error log went to %s", err);
+  } else {
+    std::snprintf(sLogStatus, sizeof sLogStatus, "FAILED: no log file could be opened");
   }
-  if (std::freopen(MP2NX_DIR "/logs/mp2-nx.err.log", "w", stderr) != nullptr) {
-    std::setvbuf(stderr, nullptr, _IOLBF, 0);
+
+  char when[64] = "unknown";
+  const time_t now = time(nullptr);
+  if (const tm* t = localtime(&now)) {
+    std::strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S (Switch clock)", t);
+  }
+  // first lines of both logs: which build wrote them, and when
+  for (FILE* f : {stdout, stderr}) {
+    std::fprintf(f, "mp2-nx: %s; this run started %s\n", mp2nx_build_id, when);
+    std::fprintf(f, "mp2-nx: logs %s\n", sLogStatus);
+  }
+  std::fprintf(stderr, "mp2-nx: the log steps:\n%s", sLogSteps);
+  std::fflush(stdout);
+  std::fflush(stderr);
+
+  // last-run.txt: written and closed now, in the logs folder or the app folder
+  for (const char* path : {MP2NX_DIR "/logs/last-run.txt", MP2NX_DIR "/last-run.txt"}) {
+    if (FILE* f = std::fopen(path, "w")) {
+      std::fprintf(f, "%s\nthis run started %s\nlogs: %s\nstdout: %s\nstderr: %s\nsteps:\n%s", mp2nx_build_id,
+                   when, sLogStatus, out ? out : "(none)", err ? err : "(none)", sLogSteps);
+      std::fclose(f);
+      break;
+    }
   }
 }
 
@@ -134,6 +229,10 @@ void show_message_and_exit(const char* text) {
 }
 
 }  // namespace
+
+// For the boot screen and the Switch menu (System > Logs).
+extern "C" const char* mp2nx_log_status(void) { return sLogStatus; }
+extern "C" bool mp2nx_logs_ok(void) { return sLogsOk; }
 
 extern "C" void userAppInit(void) {
   romfsInit();

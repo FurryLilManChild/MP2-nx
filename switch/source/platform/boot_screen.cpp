@@ -10,6 +10,8 @@
 extern "C" const char* mp2nx_boot_stage(void);                                   // load_boost.cpp
 extern "C" uint64_t mp2nx_boot_ms(void);                                         // load_boost.cpp
 extern "C" void aurora_pipeline_boot_progress(uint32_t* done, uint32_t* total);  // Aurora's pipeline_cache.cpp
+extern "C" const char mp2nx_build_label[];                                       // <build>/mp2nx_build_id.c
+extern "C" bool mp2nx_logs_ok(void);                                             // startup.cpp
 
 namespace {
 // 5x7 capitals, digits and a few marks; row bits, the leftmost column in bit 4
@@ -91,6 +93,9 @@ void draw_boot_screen(Canvas& cv, const char* stage, uint32_t done, uint32_t tot
     cv.text(line, cx, S(472), std::max(1, S(2)), rgba(120, 135, 150));
     snprintf(line, sizeof line, "%llu.%llu S", (unsigned long long)(ms / 1000), (unsigned long long)(ms / 100 % 10));
     cv.text(line, cx, S(640), std::max(1, S(2)), rgba(70, 80, 95));
+    // which build this is, and whether its logs opened (the build-stamp build)
+    snprintf(line, sizeof line, "%s - %s", mp2nx_build_label, mp2nx_logs_ok() ? "LOGS OK" : "LOG PROBLEM - SEE THE MENU");
+    cv.text(line, cx, S(680), std::max(1, S(2)), mp2nx_logs_ok() ? rgba(70, 80, 95) : rgba(230, 90, 70));
 }
 
 }  // namespace
