@@ -511,7 +511,7 @@ index 468523c04..29ccf33a4 100644
    gResFactoryUnknown = 2;
  }
 diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
-index 3d4fe910a..eb41b2a3d 100644
+index 3d4fe910a..d41a12d79 100644
 --- a/src/MetroidPrime/CMapArea.cpp
 +++ b/src/MetroidPrime/CMapArea.cpp
 @@ -15,6 +15,7 @@
@@ -522,7 +522,7 @@ index 3d4fe910a..eb41b2a3d 100644
  #include "Kyoto/Streams/CInputStream.hpp"
  #include "Kyoto/Streams/CMemoryStreamOut.hpp"
  
-@@ -542,3 +543,431 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
+@@ -542,3 +543,439 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
  #endif
    return rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
  }
@@ -542,34 +542,30 @@ index 3d4fe910a..eb41b2a3d 100644
 +#include <cstdlib>
 +#include <vector>
 +
++#include <aurora/gfx.h>
++
 +extern "C" void aurora_gx_drawing_state(float pn[12], float proj[16], float vp[4], float* lineWidth,
 +                                        int* cullMode);  // Aurora's gx/gx.cpp (mp2-nx)
 +
++// The GPU map path (build 2). Each surface queues its fill triangles and outline segments as instances, in
++// world space with a colour each (AuroraMapInstance, aurora/gfx.h); FlushNativeBatch hands the whole queue to
++// Aurora in one copy (aurora_map_draw), and the GPU transforms the triangles and widens the segments into
++// Aurora's line quads itself: no per-vertex work on the CPU, and one draw. If Aurora refuses (it says why on
++// stderr) the same queue is drawn the CPU way, as build 1 drew it.
 +namespace {
++std::vector< AuroraMapInstance > gInst;
++std::vector< size_t > gGxWidth;  // the segments that take the GX line width in force at the flush
 +struct NativeVtx {
 +  float x, y, z;
 +  GXColor c;
 +};
-+struct NativeSeg {
-+  CVector3f a, b;
-+  GXColor c;
-+  float width;  // logical pixels; < 0: the GX line width in force (the thin outline path never sets one)
-+};
-+// The queue in draw order: a run of fill vertices (gFill) or of outline segments (gSegs).
-+struct NativeRun {
-+  bool lines;
-+  uint first, count;
-+};
-+std::vector< NativeVtx > gFill;
-+std::vector< NativeSeg > gSegs;
-+std::vector< NativeRun > gRuns;
 +std::vector< NativeVtx > gOut;
 +GXColor gLastK = {0, 0, 0, 0};
 +// the per-frame costs (the map diagnostics build)
 +struct NativeStats {
-+  unsigned long long frames, draw, queue, state, expand, write, flushes, verts;
++  unsigned long long frames, draw, queue, state, handoff, fallback, flushes, fills, segs, cpuFlushes;
 +};
-+NativeStats gStats = {0, 0, 0, 0, 0, 0, 0, 0};
++NativeStats gStats = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
 +unsigned long long gStatsWindow = 0;
 +inline unsigned long long native_now() {
 +  return static_cast< unsigned long long >(std::chrono::duration_cast< std::chrono::nanoseconds >(
@@ -578,20 +574,23 @@ index 3d4fe910a..eb41b2a3d 100644
 +}
 +float gLastSetWidth = -1.f;  // the last width the thick outline path set (CGraphics::SetLineWidth)
 +
-+void add_run(bool lines, uint count) {
-+  const uint first = lines ? gSegs.size() - count : gFill.size() - count;
-+  if (!gRuns.empty() && gRuns.back().lines == lines && gRuns.back().first + gRuns.back().count == first) {
-+    gRuns.back().count += count;
-+  } else {
-+    NativeRun r = {lines, first, count};
-+    gRuns.push_back(r);
-+  }
++inline void put3(float* d, const CVector3f& v) {
++  d[0] = v.GetX();
++  d[1] = v.GetY();
++  d[2] = v.GetZ();
 +}
 +
-+inline void push_fill(const CTransform4f& xf, const CVector3f* verts, uchar i, GXColor c) {
-+  const CVector3f p = xf * verts[i];
-+  NativeVtx v = {p.GetX(), p.GetY(), p.GetZ(), c};
-+  gFill.push_back(v);
++inline void push_tri(const CTransform4f& xf, const CVector3f* verts, uchar a, uchar b, uchar c, GXColor col) {
++  AuroraMapInstance in;
++  put3(in.p0, xf * verts[a]);
++  put3(in.p1, xf * verts[b]);
++  put3(in.p2, xf * verts[c]);
++  in.color[0] = col.r;
++  in.color[1] = col.g;
++  in.color[2] = col.b;
++  in.color[3] = col.a;
++  in.kind = -1.f;
++  gInst.push_back(in);
 +}
 +
 +bool invert4(const float m[16], float out[16]) {
@@ -690,7 +689,6 @@ index 3d4fe910a..eb41b2a3d 100644
 +  if (hasSurfAlpha) {
 +    const GXColor c = surfColor.GetGXColor();
 +    gLastK = c;
-+    const uint before = gFill.size();
 +    const int* surface = &mSurfOffset[1];
 +    for (int i = 0; i < numSurfaces; ++i) {
 +      const GXPrimitive prim = static_cast< GXPrimitive >(*surface++);
@@ -699,45 +697,29 @@ index 3d4fe910a..eb41b2a3d 100644
 +      surface += ((n + 3) & ~3) / 4;
 +      // The triangles Aurora makes of each primitive (gx/command_processor.cpp), in its order and winding.
 +      if (prim == GX_TRIANGLES) {
-+        for (int v = 0; v < n / 3 * 3; ++v) {
-+          push_fill(xf, verts, d[v], c);
++        for (int v = 0; v + 3 <= n; v += 3) {
++          push_tri(xf, verts, d[v], d[v + 1], d[v + 2], c);
 +        }
 +      } else if (prim == GX_TRIANGLESTRIP && n >= 3) {
-+        push_fill(xf, verts, d[0], c);
-+        push_fill(xf, verts, d[1], c);
-+        push_fill(xf, verts, d[2], c);
++        push_tri(xf, verts, d[0], d[1], d[2], c);
 +        for (int v = 3; v < n; ++v) {
 +          if ((v & 1) == 0) {
-+            push_fill(xf, verts, d[v - 2], c);
-+            push_fill(xf, verts, d[v - 1], c);
++            push_tri(xf, verts, d[v - 2], d[v - 1], d[v], c);
 +          } else {
-+            push_fill(xf, verts, d[v - 1], c);
-+            push_fill(xf, verts, d[v - 2], c);
++            push_tri(xf, verts, d[v - 1], d[v - 2], d[v], c);
 +          }
-+          push_fill(xf, verts, d[v], c);
 +        }
 +      } else if (prim == GX_TRIANGLEFAN && n >= 3) {
-+        push_fill(xf, verts, d[0], c);
-+        push_fill(xf, verts, d[1], c);
-+        push_fill(xf, verts, d[2], c);
++        push_tri(xf, verts, d[0], d[1], d[2], c);
 +        for (int v = 3; v < n; ++v) {
-+          push_fill(xf, verts, d[0], c);
-+          push_fill(xf, verts, d[v - 1], c);
-+          push_fill(xf, verts, d[v], c);
++          push_tri(xf, verts, d[0], d[v - 1], d[v], c);
 +        }
 +      } else if (prim == GX_QUADS) {
 +        for (int v = 0; v + 4 <= n; v += 4) {
-+          push_fill(xf, verts, d[v], c);
-+          push_fill(xf, verts, d[v + 1], c);
-+          push_fill(xf, verts, d[v + 2], c);
-+          push_fill(xf, verts, d[v + 2], c);
-+          push_fill(xf, verts, d[v + 3], c);
-+          push_fill(xf, verts, d[v], c);
++          push_tri(xf, verts, d[v], d[v + 1], d[v + 2], c);
++          push_tri(xf, verts, d[v + 2], d[v + 3], d[v], c);
 +        }
 +      }
-+    }
-+    if (gFill.size() > before) {
-+      add_run(false, gFill.size() - before);
 +    }
 +  }
 +  if (hasLineAlpha) {
@@ -751,120 +733,110 @@ index 3d4fe910a..eb41b2a3d 100644
 +      }
 +      const GXColor c = lineColor.WithAlphaModulatedBy(thickLine ? 0.5f : 1.0f).GetGXColor();
 +      gLastK = c;
-+      const uint before = gSegs.size();
 +      const int* outline = &mOutlineOffset[1];
 +      for (int i = 0; i < numOutlines; ++i) {
 +        const int n = *outline++;
 +        const uchar* d = reinterpret_cast< const uchar* >(outline);
 +        outline += ((n + 3) & ~3) / 4;
++        CVector3f prev = n > 0 ? xf * verts[d[0]] : CVector3f::Zero();
 +        for (int v = 0; v + 1 < n; ++v) {
-+          NativeSeg s = {xf * verts[d[v]], xf * verts[d[v + 1]], c, width};
-+          gSegs.push_back(s);
++          const CVector3f next = xf * verts[d[v + 1]];
++          AuroraMapInstance in;
++          put3(in.p0, prev);
++          put3(in.p1, next);
++          in.p2[0] = in.p2[1] = in.p2[2] = 0.f;
++          in.color[0] = c.r;
++          in.color[1] = c.g;
++          in.color[2] = c.b;
++          in.color[3] = c.a;
++          in.kind = width;
++          if (width < 0.f) {
++            gGxWidth.push_back(gInst.size());
++          }
++          gInst.push_back(in);
++          prev = next;
 +        }
-+      }
-+      if (gSegs.size() > before) {
-+        add_run(true, gSegs.size() - before);
 +      }
 +    }
 +  }
 +}
 +
-+void CMapArea::FlushNativeBatch() {
-+  if (gRuns.empty()) {
-+    return;
-+  }
-+  // The batch is in world space: the model matrix is the identity, so the position matrix is the view.
-+  const unsigned long long flushStart = native_now();
-+  CGraphics::SetIdentityModelMatrix();
-+  float pn[12], proj[16], vp[4], gxWidth = 1.f;
-+  int cull = GX_CULL_NONE;
-+  aurora_gx_drawing_state(pn, proj, vp, &gxWidth, &cull);
-+  const unsigned long long stateDone = native_now();
-+  gStats.state += stateDone - flushStart;
-+  gStats.flushes++;
-+  // proj and the position matrix (as a 4x4) inverted: a line quad's corners, built in clip space, go back to
-+  // world space, so the GPU's own transform puts them where Aurora's line shader would.
++namespace {
++// Build 1's CPU path, kept for a flush Aurora refuses: the triangles as they are, the segments widened into
++// Aurora's quads here and taken back to world space, written through GX.
++void draw_cpu(const float pn[12], const float proj[16], const float vp[4], int cull) {
 +  float pn4[16] = {pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7], pn[8], pn[9], pn[10], pn[11], 0.f, 0.f, 0.f, 1.f};
 +  float projInv[16], pnInv[16];
 +  const bool canLines = invert4(proj, projInv) && invert4(pn4, pnInv);
 +  const float renderW = vp[0] > 0.f ? vp[0] : 1.f, renderH = vp[1] > 0.f ? vp[1] : 1.f;
 +  const float scale = CMath::Min(renderW / CMath::Max(vp[2], 1.f), renderH / CMath::Max(vp[3], 1.f));
-+  const bool bothWindings = cull != GX_CULL_NONE;  // (Aurora draws lines unculled; one winding survives)
-+
++  const bool bothWindings = cull != GX_CULL_NONE;
 +  gOut.clear();
-+  for (int r = 0; r < gRuns.size(); ++r) {
-+    const NativeRun& run = gRuns[r];
-+    if (!run.lines) {
-+      gOut.insert(gOut.end(), gFill.begin() + run.first, gFill.begin() + run.first + run.count);
++  for (size_t k = 0; k < gInst.size(); ++k) {
++    const AuroraMapInstance& s = gInst[k];
++    const GXColor col = {s.color[0], s.color[1], s.color[2], s.color[3]};
++    if (s.kind < 0.f) {
++      const float* ps[3] = {s.p0, s.p1, s.p2};
++      for (int i = 0; i < 3; ++i) {
++        NativeVtx v = {ps[i][0], ps[i][1], ps[i][2], col};
++        gOut.push_back(v);
++      }
 +      continue;
 +    }
 +    if (!canLines) {
 +      continue;
 +    }
-+    for (uint k = run.first; k < run.first + run.count; ++k) {
-+      const NativeSeg& s = gSegs[k];
-+      float clip[2][4];
-+      const CVector3f* ends[2] = {&s.a, &s.b};
-+      for (int e = 0; e < 2; ++e) {
-+        const float wx = ends[e]->GetX(), wy = ends[e]->GetY(), wz = ends[e]->GetZ();
-+        const float mv[4] = {pn[0] * wx + pn[1] * wy + pn[2] * wz + pn[3],
-+                             pn[4] * wx + pn[5] * wy + pn[6] * wz + pn[7],
-+                             pn[8] * wx + pn[9] * wy + pn[10] * wz + pn[11], 1.f};
-+        for (int i = 0; i < 4; ++i) {
-+          clip[e][i] = proj[i * 4] * mv[0] + proj[i * 4 + 1] * mv[1] + proj[i * 4 + 2] * mv[2] + proj[i * 4 + 3];
-+        }
++    float clip[2][4];
++    const float* ends[2] = {s.p0, s.p1};
++    for (int e = 0; e < 2; ++e) {
++      const float wx = ends[e][0], wy = ends[e][1], wz = ends[e][2];
++      const float mv[4] = {pn[0] * wx + pn[1] * wy + pn[2] * wz + pn[3], pn[4] * wx + pn[5] * wy + pn[6] * wz + pn[7],
++                           pn[8] * wx + pn[9] * wy + pn[10] * wz + pn[11], 1.f};
++      for (int i = 0; i < 4; ++i) {
++        clip[e][i] = proj[i * 4] * mv[0] + proj[i * 4 + 1] * mv[1] + proj[i * 4 + 2] * mv[2] + proj[i * 4 + 3];
 +      }
-+      // gx/shader.cpp's line expansion
-+      const float ndcAx = clip[0][0] / clip[0][3], ndcAy = clip[0][1] / clip[0][3];
-+      const float ndcBx = clip[1][0] / clip[1][3], ndcBy = clip[1][1] / clip[1][3];
-+      const float dx = (ndcBx - ndcAx) / 2.f * renderW, dy = (ndcBy - ndcAy) / 2.f * renderH;
-+      float dirX = 1.f, dirY = 0.f;
-+      const float len2 = dx * dx + dy * dy;
-+      if (len2 > 1e-10f) {
-+        const float inv = 1.f / CMath::SqrtF(len2);
-+        dirX = dx * inv;
-+        dirY = dy * inv;
++    }
++    const float ndcAx = clip[0][0] / clip[0][3], ndcAy = clip[0][1] / clip[0][3];
++    const float ndcBx = clip[1][0] / clip[1][3], ndcBy = clip[1][1] / clip[1][3];
++    const float dx = (ndcBx - ndcAx) / 2.f * renderW, dy = (ndcBy - ndcAy) / 2.f * renderH;
++    float dirX = 1.f, dirY = 0.f;
++    const float len2 = dx * dx + dy * dy;
++    if (len2 > 1e-10f) {
++      const float inv = 1.f / CMath::SqrtF(len2);
++      dirX = dx * inv;
++      dirY = dy * inv;
++    }
++    const float lw = s.kind * scale;
++    const float offX = -dirY * (lw / 2.f) * 2.f / renderW;
++    const float offY = dirX * (lw / 2.f) * 2.f / renderH;
++    NativeVtx corner[4];
++    for (int q = 0; q < 4; ++q) {
++      const float* base = clip[q >= 2 ? 1 : 0];
++      const float sign = (q & 1) != 0 ? 1.f : -1.f;
++      const float c4[4] = {base[0] + offX * sign * base[3], base[1] + offY * sign * base[3], base[2], base[3]};
++      float h[4];
++      for (int i = 0; i < 4; ++i) {
++        h[i] = projInv[i * 4] * c4[0] + projInv[i * 4 + 1] * c4[1] + projInv[i * 4 + 2] * c4[2] + projInv[i * 4 + 3] * c4[3];
 +      }
-+      const float lw = (s.width < 0.f ? gxWidth : s.width) * scale;
-+      const float offX = -dirY * (lw / 2.f) * 2.f / renderW;
-+      const float offY = dirX * (lw / 2.f) * 2.f / renderH;
-+      // corners 0..3: a-, a+, b-, b+ (Aurora's vidx: bit 0 the side, 2 and 3 the b end)
-+      NativeVtx corner[4];
-+      for (int q = 0; q < 4; ++q) {
-+        const float* base = clip[q >= 2 ? 1 : 0];
-+        const float sign = (q & 1) != 0 ? 1.f : -1.f;
-+        const float c4[4] = {base[0] + offX * sign * base[3], base[1] + offY * sign * base[3], base[2], base[3]};
-+        float h[4];
-+        for (int i = 0; i < 4; ++i) {
-+          h[i] = projInv[i * 4] * c4[0] + projInv[i * 4 + 1] * c4[1] + projInv[i * 4 + 2] * c4[2] +
-+                 projInv[i * 4 + 3] * c4[3];
-+        }
-+        const float iw = h[3] != 0.f ? 1.f / h[3] : 1.f;
-+        const float m[3] = {h[0] * iw, h[1] * iw, h[2] * iw};
-+        NativeVtx v;
-+        v.x = pnInv[0] * m[0] + pnInv[1] * m[1] + pnInv[2] * m[2] + pnInv[3];
-+        v.y = pnInv[4] * m[0] + pnInv[5] * m[1] + pnInv[6] * m[2] + pnInv[7];
-+        v.z = pnInv[8] * m[0] + pnInv[9] * m[1] + pnInv[10] * m[2] + pnInv[11];
-+        v.c = s.c;
-+        corner[q] = v;
-+      }
-+      // Aurora's quad: (0, 1, 3), (3, 2, 0)
-+      static const int kOrder[6] = {0, 1, 3, 3, 2, 0};
-+      for (int i = 0; i < 6; ++i) {
++      const float iw = h[3] != 0.f ? 1.f / h[3] : 1.f;
++      const float m[3] = {h[0] * iw, h[1] * iw, h[2] * iw};
++      NativeVtx v;
++      v.x = pnInv[0] * m[0] + pnInv[1] * m[1] + pnInv[2] * m[2] + pnInv[3];
++      v.y = pnInv[4] * m[0] + pnInv[5] * m[1] + pnInv[6] * m[2] + pnInv[7];
++      v.z = pnInv[8] * m[0] + pnInv[9] * m[1] + pnInv[10] * m[2] + pnInv[11];
++      v.c = col;
++      corner[q] = v;
++    }
++    static const int kOrder[6] = {0, 1, 3, 3, 2, 0};
++    for (int i = 0; i < 6; ++i) {
++      gOut.push_back(corner[kOrder[i]]);
++    }
++    if (bothWindings) {
++      for (int i = 5; i >= 0; --i) {
 +        gOut.push_back(corner[kOrder[i]]);
-+      }
-+      if (bothWindings) {
-+        for (int i = 5; i >= 0; --i) {
-+          gOut.push_back(corner[kOrder[i]]);
-+        }
 +      }
 +    }
 +  }
-+
-+  const unsigned long long expandDone = native_now();
-+  gStats.expand += expandDone - stateDone;
-+  gStats.verts += gOut.size();
-+  // One material for all of it: the vertex colour (the per-primitive path's K colour, per vertex now).
 +  const GXVtxDescList desc[3] = {
 +      {GX_VA_POS, GX_DIRECT},
 +      {GX_VA_CLR0, GX_DIRECT},
@@ -887,8 +859,40 @@ index 3d4fe910a..eb41b2a3d 100644
 +    }
 +    CGX::End();
 +  }
++}
++}  // namespace
 +
-+  gStats.write += native_now() - expandDone;
++void CMapArea::FlushNativeBatch() {
++  if (gInst.empty()) {
++    return;
++  }
++  // The batch is in world space: the model matrix is the identity, so the position matrix is the view.
++  const unsigned long long flushStart = native_now();
++  CGraphics::SetIdentityModelMatrix();
++  float pn[12], proj[16], vp[4], gxWidth = 1.f;
++  int cull = GX_CULL_NONE;
++  aurora_gx_drawing_state(pn, proj, vp, &gxWidth, &cull);  // (drains the FIFO)
++  for (size_t k = 0; k < gGxWidth.size(); ++k) {
++    gInst[gGxWidth[k]].kind = gxWidth;
++  }
++  const unsigned long long stateDone = native_now();
++  gStats.state += stateDone - flushStart;
++  gStats.flushes++;
++  uint fills = 0;
++  for (size_t k = 0; k < gInst.size(); ++k) {
++    fills += gInst[k].kind < 0.f ? 1 : 0;
++  }
++  gStats.fills += fills;
++  gStats.segs += gInst.size() - fills;
++
++  const bool gpu = aurora_map_draw(gInst.data(), static_cast< uint32_t >(gInst.size()));
++  const unsigned long long handoffDone = native_now();
++  gStats.handoff += handoffDone - stateDone;
++  if (!gpu) {
++    draw_cpu(pn, proj, vp, cull);
++    gStats.cpuFlushes++;
++    gStats.fallback += native_now() - handoffDone;
++  }
 +  // The state the per-primitive path leaves: its material, the last K colour and line width.
 +  CMapAreaSurface::SetupGXMaterial();
 +  CGX::SetTevKColor(GX_KCOLOR0, gLastK);
@@ -898,13 +902,11 @@ index 3d4fe910a..eb41b2a3d 100644
 +  static int reports = 0;
 +  if (reports < 3) {
 +    ++reports;
-+    std::fprintf(stderr, "map: native batch: %u fill vertices, %u outline segments, %u runs, %u vertices drawn\n",
-+             static_cast< uint >(gFill.size()), static_cast< uint >(gSegs.size()),
-+             static_cast< uint >(gRuns.size()), static_cast< uint >(gOut.size()));
++    std::fprintf(stderr, "map: native batch: %u fill triangles, %u outline segments, %s\n", fills,
++                 static_cast< uint >(gInst.size() - fills), gpu ? "one GPU draw" : "drawn the CPU way");
 +  }
-+  gFill.clear();
-+  gSegs.clear();
-+  gRuns.clear();
++  gInst.clear();
++  gGxWidth.clear();
 +  gLastSetWidth = -1.f;
 +}
 +#endif
@@ -946,10 +948,16 @@ index 3d4fe910a..eb41b2a3d 100644
 +    return;
 +  }
 +  const double n = double(gStats.frames);
-+  std::fprintf(stderr, "map: %s path, per frame (%llu frames): the sorted map draw %.2f ms; of it queueing %.2f ms, %.1f flushes taking "
-+           "the GX state %.2f ms (with a FIFO drain), the line expansion %.2f ms, the GX writes %.2f ms (%.0f vertices)\n",
-+           native ? "NATIVE" : "GX (old)", gStats.frames, gStats.draw / n / 1e6, gStats.queue / n / 1e6, gStats.flushes / n, gStats.state / n / 1e6,
-+           gStats.expand / n / 1e6, gStats.write / n / 1e6, gStats.verts / n);
++  if (native) {
++    std::fprintf(stderr, "map: NATIVE (GPU) path, per frame (%llu frames): the sorted map draw %.2f ms; of it queueing %.2f ms, "
++                 "%.1f flushes taking the GX state %.2f ms (with a FIFO drain), the hand-off to the GPU %.2f ms, the CPU "
++                 "fallback %.2f ms (%llu flushes); %.0f fill triangles and %.0f segments\n",
++                 gStats.frames, gStats.draw / n / 1e6, gStats.queue / n / 1e6, gStats.flushes / n, gStats.state / n / 1e6,
++                 gStats.handoff / n / 1e6, gStats.fallback / n / 1e6, gStats.cpuFlushes, gStats.fills / n, gStats.segs / n);
++  } else {
++    std::fprintf(stderr, "map: GX (old) path, per frame (%llu frames): the sorted map draw %.2f ms\n", gStats.frames,
++                 gStats.draw / n / 1e6);
++  }
 +  gStats = NativeStats();
 +  gStatsWindow = now;
 +}

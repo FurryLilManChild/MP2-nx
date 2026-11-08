@@ -1,5 +1,5 @@
 diff --git a/include/aurora/gfx.h b/include/aurora/gfx.h
-index e640c6221..da641f71d 100644
+index e640c6221..134434163 100644
 --- a/include/aurora/gfx.h
 +++ b/include/aurora/gfx.h
 @@ -69,6 +69,9 @@ uint64_t aurora_pipeline_set_context(uint64_t context);
@@ -12,6 +12,28 @@ index e640c6221..da641f71d 100644
  typedef struct {
    uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
    uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
+@@ -116,6 +119,21 @@ bool aurora_gx_texobj_rgba8(const void* obj, uint32_t* width, uint32_t* height,
+ 
+ void aurora_enable_vsync(bool enabled);
+ 
++// mp2-nx: the map screen's native draw (lib/gx/gx.cpp). An instance is one fill triangle (kind < 0: p0, p1, p2)
++// or one outline segment (kind >= 0: p0 to p1, kind its width in logical pixels, as GXSetLineWidth's / 6), in
++// world space: the GX position matrix and projection in force at the call transform it.
++typedef struct AuroraMapInstance {
++  float p0[3];
++  float p1[3];
++  float p2[3];
++  uint8_t color[4]; // r, g, b, a
++  float kind;
++} AuroraMapInstance;
++// Game thread. Drains the GX FIFO and records the instances, in order, as one GPU draw at this point of the
++// frame, with the GX blend, depth and cull state in force. False when it cannot (nothing recorded, the reason
++// on stderr): the caller draws them through GX instead.
++bool aurora_map_draw(const AuroraMapInstance* instances, uint32_t count);
++
+ #ifdef __cplusplus
+ }
+ #endif
 diff --git a/lib/aurora.cpp b/lib/aurora.cpp
 index b7f692cbf..3d0c6d8a6 100644
 --- a/lib/aurora.cpp
@@ -1265,10 +1287,10 @@ index efddaaf2a..54d320c46 100644
 +  *grows = sStatGrows.load(std::memory_order_relaxed);
 +}
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
-index ac6a3b6cb..0afc7d249 100644
+index ac6a3b6cb..d74e45305 100644
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
-@@ -1034,3 +1034,34 @@ void shutdown() noexcept {
+@@ -1034,3 +1034,408 @@ void shutdown() noexcept {
    texture::shutdown();
  }
  } // namespace aurora::gx
@@ -1302,6 +1324,380 @@ index ac6a3b6cb..0afc7d249 100644
 +  vp[3] = g_gxState.logicalViewport.height;
 +  *lineWidth = static_cast<float>(g_gxState.lineWidth) / 6.f;
 +  *cullMode = static_cast<int>(g_gxState.cullMode);
++}
++
++// ---- mp2-nx: the map screen's native draw (aurora/map_draw.h; CMapArea.cpp builds the instances)
++// The map's surfaces and outlines in one GPU draw, nothing per vertex on the CPU. Each instance is a fill
++// triangle or an outline segment, in world space, with its colour; the vertex shader transforms it with the GX
++// position matrix and projection in force, and widens a segment into the screen-space quad Aurora's GX line
++// shader would draw (gx/shader.cpp, lineMode 1). The draw sits in the EFB pass where it was recorded, with the
++// GX blend, depth and cull state of that moment, so it composites as the GX draws it replaces.
++// Fills are culled by the pipeline as GX would cull them. Aurora draws GX lines unculled; a segment's quad
++// therefore goes in both windings when culling is on (one survives) and in one when it is off, which is what
++// the CPU path this replaces did (and what showed the same image).
++#include <aurora/gfx.hpp>
++#include <aurora/gfx.h>
++#include <array>
++#include <chrono>
++#include <cstdio>
++#include <vector>
++
++namespace {
++using namespace aurora;
++using namespace aurora::gx;
++
++static_assert(sizeof(AuroraMapInstance) == 44);
++
++struct MapUniform {
++  float pn[12];   // the position matrix's rows
++  float proj[16]; // the projection's rows, z as GX draws use it (shader_info.cpp)
++  float vp[4];    // render viewport w, h; logical viewport w, h
++  float misc[4];  // x: both windings for the segments (culling is on)
++};
++static_assert(sizeof(MapUniform) == 144);
++
++struct MapPipeKey {
++  uint32_t colorOp, colorSrc, colorDst, alphaOp, alphaSrc, alphaDst;
++  uint32_t writeMask, depthWrite, depthCompare, cull;
++  int32_t depthBias;
++  float slope, clamp;
++  bool operator==(const MapPipeKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
++};
++
++struct MapPayload {
++  MapPipeKey key;
++  gfx::Range inst;
++  gfx::Range uniform;
++  uint32_t count;
++};
++static_assert(sizeof(MapPayload) <= gfx::InlineDrawPayloadSize);
++
++constexpr const char* MapSource = R"(
++struct U {
++  pn: array<vec4f, 3>,
++  proj: array<vec4f, 4>,
++  vp: vec4f,
++  misc: vec4f,
++};
++@group(0) @binding(0) var<uniform> u: U;
++
++struct VIn {
++  @builtin(vertex_index) vi: u32,
++  @location(0) p0: vec3f,
++  @location(1) p1: vec3f,
++  @location(2) p2: vec3f,
++  @location(3) color: vec4f,
++  @location(4) kind: f32,
++};
++struct VOut {
++  @builtin(position) pos: vec4f,
++  @location(0) color: vec4f,
++};
++
++fn to_clip(p: vec3f) -> vec4f {
++  let v = vec4f(p, 1.0);
++  let mv = vec4f(dot(v, u.pn[0]), dot(v, u.pn[1]), dot(v, u.pn[2]), 1.0);
++  return vec4f(dot(mv, u.proj[0]), dot(mv, u.proj[1]), dot(mv, u.proj[2]), dot(mv, u.proj[3]));
++}
++
++@vertex
++fn vs_main(in: VIn) -> VOut {
++  var out: VOut;
++  out.color = in.color;
++  out.pos = vec4f(0.0, 0.0, 0.0, 1.0);
++  if (in.kind < 0.0) {
++    // a fill triangle: vertices 0..2, the rest collapse to a point (no pixels)
++    if (in.vi < 3u) {
++      var p = in.p0;
++      if (in.vi == 1u) { p = in.p1; }
++      if (in.vi == 2u) { p = in.p2; }
++      out.pos = to_clip(p);
++    }
++    return out;
++  }
++  // a segment: Aurora's quad (0, 1, 3), (3, 2, 0); vertices 6..11 the same in reverse when culling is on
++  var k = in.vi;
++  if (k >= 6u) {
++    if (u.misc.x == 0.0) {
++      return out;
++    }
++    k = 11u - k;
++  }
++  var order = array<u32, 6>(0u, 1u, 3u, 3u, 2u, 0u);
++  let q = order[k];
++  let clip_a = to_clip(in.p0);
++  let clip_b = to_clip(in.p1);
++  let ndc_a = clip_a.xy / clip_a.w;
++  let ndc_b = clip_b.xy / clip_b.w;
++  let render = u.vp.xy;
++  let viewport_scale = render / max(u.vp.zw, vec2f(1.0));
++  let delta_px = (ndc_b - ndc_a) / 2.0 * render;
++  let dir_px = select(vec2f(1.0, 0.0), normalize(delta_px), dot(delta_px, delta_px) > 1e-10);
++  let perp_px = vec2f(-dir_px.y, dir_px.x);
++  let line_width = in.kind * min(viewport_scale.x, viewport_scale.y);
++  let offset_px = perp_px * (line_width / 2.0) * select(-1.0, 1.0, (q & 1u) != 0u);
++  let offset_ndc = (offset_px * 2.0) / render;
++  let base = select(clip_a, clip_b, q >= 2u);
++  out.pos = vec4f(base.xy + offset_ndc * base.w, base.zw);
++  return out;
++}
++
++@fragment
++fn fs_main(in: VOut) -> @location(0) vec4f {
++  return in.color;
++}
++)";
++
++struct MapPipe {
++  MapPipeKey key;
++  uint64_t layoutKey;
++  uint32_t samples;
++  wgpu::RenderPipeline pipeline;
++};
++
++struct MapState {
++  gfx::DrawTypeId drawType = gfx::InvalidDrawType;
++  // render worker only
++  wgpu::ShaderModule module;
++  wgpu::BindGroupLayout bindLayout;
++  wgpu::PipelineLayout pipelineLayout;
++  std::vector<MapPipe> pipes;
++  const void* groupBuffer = nullptr;
++  wgpu::BindGroup group;
++  bool failedOnce = false;
++};
++MapState g_map;
++
++unsigned long long map_now_ns() {
++  return static_cast<unsigned long long>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
++wgpu::RenderPipeline map_pipeline(const gfx::DrawContext& ctx, const MapPipeKey& key) {
++  for (const auto& p : g_map.pipes) {
++    if (p.key == key && p.layoutKey == ctx.layout.key && p.samples == ctx.layout.sampleCount) {
++      return p.pipeline;
++    }
++  }
++  const unsigned long long t0 = map_now_ns();
++  if (!g_map.module) {
++    wgpu::ShaderSourceWGSL wgsl{};
++    wgsl.code = MapSource;
++    const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = "mp2-nx Map Module"};
++    g_map.module = ctx.device.CreateShaderModule(&md);
++    const wgpu::BindGroupLayoutEntry entry{
++        .binding = 0,
++        .visibility = wgpu::ShaderStage::Vertex,
++        .buffer = {.type = wgpu::BufferBindingType::Uniform, .hasDynamicOffset = true,
++                   .minBindingSize = sizeof(MapUniform)},
++    };
++    const wgpu::BindGroupLayoutDescriptor bl{.label = "mp2-nx Map Bind Group Layout", .entryCount = 1, .entries = &entry};
++    g_map.bindLayout = ctx.device.CreateBindGroupLayout(&bl);
++    const wgpu::PipelineLayoutDescriptor pl{
++        .label = "mp2-nx Map Pipeline Layout", .bindGroupLayoutCount = 1, .bindGroupLayouts = &g_map.bindLayout};
++    g_map.pipelineLayout = ctx.device.CreatePipelineLayout(&pl);
++  }
++  static constexpr std::array<wgpu::VertexAttribute, 5> attributes{{
++      {.format = wgpu::VertexFormat::Float32x3, .offset = offsetof(AuroraMapInstance, p0), .shaderLocation = 0},
++      {.format = wgpu::VertexFormat::Float32x3, .offset = offsetof(AuroraMapInstance, p1), .shaderLocation = 1},
++      {.format = wgpu::VertexFormat::Float32x3, .offset = offsetof(AuroraMapInstance, p2), .shaderLocation = 2},
++      {.format = wgpu::VertexFormat::Unorm8x4, .offset = offsetof(AuroraMapInstance, color), .shaderLocation = 3},
++      {.format = wgpu::VertexFormat::Float32, .offset = offsetof(AuroraMapInstance, kind), .shaderLocation = 4},
++  }};
++  const wgpu::VertexBufferLayout vertexLayout{
++      .stepMode = wgpu::VertexStepMode::Instance,
++      .arrayStride = sizeof(AuroraMapInstance),
++      .attributeCount = attributes.size(),
++      .attributes = attributes.data(),
++  };
++  const wgpu::BlendState blend{
++      .color = {.operation = static_cast<wgpu::BlendOperation>(key.colorOp),
++                .srcFactor = static_cast<wgpu::BlendFactor>(key.colorSrc),
++                .dstFactor = static_cast<wgpu::BlendFactor>(key.colorDst)},
++      .alpha = {.operation = static_cast<wgpu::BlendOperation>(key.alphaOp),
++                .srcFactor = static_cast<wgpu::BlendFactor>(key.alphaSrc),
++                .dstFactor = static_cast<wgpu::BlendFactor>(key.alphaDst)},
++  };
++  std::array<wgpu::ColorTargetState, gfx::MaxColorAttachments> targets{};
++  for (uint32_t i = 0; i < ctx.layout.colorAttachmentCount; ++i) {
++    const bool scene = i == gfx::SceneColorAttachmentIndex;
++    targets[i] = {
++        .format = ctx.layout.colorAttachments[i].format,
++        .blend = scene ? &blend : nullptr,
++        .writeMask = scene ? static_cast<wgpu::ColorWriteMask>(key.writeMask) : wgpu::ColorWriteMask::None,
++    };
++  }
++  const wgpu::FragmentState fragment{
++      .module = g_map.module,
++      .entryPoint = "fs_main",
++      .targetCount = ctx.layout.colorAttachmentCount,
++      .targets = targets.data(),
++  };
++  const wgpu::DepthStencilState depth{
++      .format = ctx.layout.depthStencilFormat,
++      .depthWriteEnabled = key.depthWrite != 0,
++      .depthCompare = static_cast<wgpu::CompareFunction>(key.depthCompare),
++      .depthBias = key.depthBias,
++      .depthBiasSlopeScale = key.slope,
++      .depthBiasClamp = key.clamp,
++  };
++  const wgpu::RenderPipelineDescriptor descriptor{
++      .label = "mp2-nx Map Pipeline",
++      .layout = g_map.pipelineLayout,
++      .vertex = {.module = g_map.module, .entryPoint = "vs_main", .bufferCount = 1, .buffers = &vertexLayout},
++      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList,
++                    .frontFace = wgpu::FrontFace::CW,
++                    .cullMode = static_cast<wgpu::CullMode>(key.cull)},
++      .depthStencil = ctx.layout.depthStencilFormat != wgpu::TextureFormat::Undefined ? &depth : nullptr,
++      .multisample = {.count = ctx.layout.sampleCount, .mask = UINT32_MAX},
++      .fragment = &fragment,
++  };
++  wgpu::RenderPipeline pipeline = ctx.device.CreateRenderPipeline(&descriptor);
++  std::fprintf(stderr,
++               "map: GPU path: pipeline %zu made in %.1f ms (%s; %u colour targets, %u samples, cull %u, depth "
++               "compare %u, depth write %u)\n",
++               g_map.pipes.size() + 1, double(map_now_ns() - t0) / 1e6, pipeline ? "ok" : "FAILED",
++               ctx.layout.colorAttachmentCount, ctx.layout.sampleCount, key.cull, key.depthCompare, key.depthWrite);
++  if (pipeline) {
++    g_map.pipes.push_back(MapPipe{key, ctx.layout.key, ctx.layout.sampleCount, pipeline});
++  }
++  return pipeline;
++}
++
++void map_draw_cb(const gfx::DrawContext& ctx, const wgpu::RenderPassEncoder& pass, const void* data, size_t size,
++                 void*) {
++  if (size != sizeof(MapPayload)) {
++    return;
++  }
++  MapPayload p;
++  std::memcpy(&p, data, sizeof(p));
++  const wgpu::RenderPipeline pipeline = map_pipeline(ctx, p.key);
++  if (!pipeline) {
++    if (!g_map.failedOnce) {
++      g_map.failedOnce = true;
++      std::fprintf(stderr, "map: GPU path: no pipeline, the map draw was skipped\n");
++    }
++    return;
++  }
++  if (!g_map.group || g_map.groupBuffer != ctx.uniformBuffer.Get()) {
++    const wgpu::BindGroupEntry entry{.binding = 0, .buffer = ctx.uniformBuffer, .size = sizeof(MapUniform)};
++    const wgpu::BindGroupDescriptor bd{
++        .label = "mp2-nx Map Bind Group", .layout = g_map.bindLayout, .entryCount = 1, .entries = &entry};
++    g_map.group = ctx.device.CreateBindGroup(&bd);
++    g_map.groupBuffer = ctx.uniformBuffer.Get();
++  }
++  pass.SetPipeline(pipeline);
++  pass.SetBindGroup(0, g_map.group, 1, &p.uniform.offset);
++  pass.SetVertexBuffer(0, ctx.vertexBuffer, p.inst.offset, p.inst.size);
++  pass.Draw(12, p.count);
++}
++
++uint32_t map_refusals = 0;
++void map_refuse(const char* why) {
++  if (map_refusals < 8) {
++    ++map_refusals;
++    std::fprintf(stderr, "map: GPU path refused (%s); this flush is drawn the CPU way\n", why);
++  }
++}
++} // namespace
++
++extern "C" bool aurora_map_draw(const AuroraMapInstance* instances, uint32_t count) {
++  using namespace aurora::gx;
++  fifo::drain();
++  if (count == 0) {
++    return true;
++  }
++  if (g_map.drawType == gfx::InvalidDrawType) {
++    g_map.drawType = gfx::register_draw_type(gfx::DrawTypeDescriptor{.label = "mp2-nx Map", .draw = map_draw_cb});
++    if (g_map.drawType == gfx::InvalidDrawType) {
++      map_refuse("the draw type could not be registered");
++      return false;
++    }
++  }
++  if (!gfx::has_render_pass()) {
++    map_refuse("no render pass");
++    return false;
++  }
++  if (gfx::scene_hdr_pass_active()) {
++    map_refuse("the HDR scene pass");
++    return false;
++  }
++  const bool hasAlpha = efb_has_alpha(g_gxState.pixelFmt);
++  const uint32_t dstAlpha = hasAlpha && g_gxState.alphaUpdate ? g_gxState.dstAlpha : UINT32_MAX;
++  if (dstAlpha != UINT32_MAX) {
++    map_refuse("a constant destination alpha");
++    return false;
++  }
++  if (g_gxState.fog.type != GX_FOG_NONE) {
++    static bool said = false;
++    if (!said) {
++      said = true;
++      std::fprintf(stderr, "map: GPU path: GX fog is on (type %d) and the map draw is not fogged\n",
++                   int(g_gxState.fog.type));
++    }
++  }
++  const auto blendFactor = [hasAlpha](GXBlendFactor factor) {
++    if (!hasAlpha && factor == GX_BL_DSTALPHA) {
++      return GX_BL_ONE;
++    }
++    if (!hasAlpha && factor == GX_BL_INVDSTALPHA) {
++      return GX_BL_ZERO;
++    }
++    return factor;
++  };
++  const wgpu::BlendState blend = to_blend_state(g_gxState.blendMode, blendFactor(g_gxState.blendFacSrc),
++                                                blendFactor(g_gxState.blendFacDst), g_gxState.blendOp, dstAlpha, false);
++  const GXCullMode cull = g_gxState.cullMode;
++  const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cull);
++  MapPayload p{};
++  p.key.colorOp = uint32_t(blend.color.operation);
++  p.key.colorSrc = uint32_t(blend.color.srcFactor);
++  p.key.colorDst = uint32_t(blend.color.dstFactor);
++  p.key.alphaOp = uint32_t(blend.alpha.operation);
++  p.key.alphaSrc = uint32_t(blend.alpha.srcFactor);
++  p.key.alphaDst = uint32_t(blend.alpha.dstFactor);
++  p.key.writeMask = uint32_t(to_write_mask(g_gxState.colorUpdate, hasAlpha && g_gxState.alphaUpdate));
++  p.key.depthWrite = g_gxState.depthCompare && g_gxState.depthUpdate ? 1 : 0;
++  p.key.depthCompare = uint32_t(g_gxState.depthCompare ? to_compare_function(g_gxState.depthFunc)
++                                                       : wgpu::CompareFunction::Always);
++  p.key.cull = uint32_t(to_primitive_state(cull).cullMode);
++  p.key.depthBias = round_away_from_zero<int32_t>((UseReversedZ ? -1.0f : 1.0f) * polygonOffset);
++  p.key.slope = (UseReversedZ ? -1.0f : 1.0f) * polygonOffsetScale;
++  p.key.clamp = webgpu::g_hasCoreFeatures ? g_gxState.clamp : 0.0f;
++
++  MapUniform u{};
++  const auto& pos = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
++  std::memcpy(u.pn, &pos, sizeof(u.pn));
++  auto proj = g_gxState.proj;
++  if constexpr (UseReversedZ) {
++    proj.m2 = proj.m2 * Vec4<float>{-1.f, -1.f, -1.f, -1.f};
++  } else {
++    proj.m2 = proj.m2 + proj.m3;
++  }
++  static_assert(sizeof(proj) == sizeof(u.proj));
++  std::memcpy(u.proj, &proj, sizeof(u.proj));
++  u.vp[0] = g_gxState.renderViewport.width;
++  u.vp[1] = g_gxState.renderViewport.height;
++  u.vp[2] = g_gxState.logicalViewport.width;
++  u.vp[3] = g_gxState.logicalViewport.height;
++  u.misc[0] = cull != GX_CULL_NONE ? 1.f : 0.f;
++
++  p.inst = gfx::push_verts(reinterpret_cast<const uint8_t*>(instances), size_t(count) * sizeof(AuroraMapInstance), 4);
++  if (gfx::overflowed(p.inst) || p.inst.size == 0) {
++    map_refuse("the frame's vertex buffer is full");
++    return false;
++  }
++  p.uniform = gfx::push_uniform(reinterpret_cast<const uint8_t*>(&u), sizeof(u));
++  if (gfx::overflowed(p.uniform) || p.uniform.size == 0) {
++    map_refuse("the frame's uniform buffer is full");
++    return false;
++  }
++  p.count = count;
++  if (!gfx::push_custom_draw(g_map.drawType, &p, sizeof(p))) {
++    map_refuse("push_custom_draw failed");
++    return false;
++  }
++  return true;
 +}
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
 index f9d2ad809..0437ed1bf 100644

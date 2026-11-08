@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 2026-11-08: the map on the GPU (build 2)
+
+- Build 1's A/B log (busy zoomed-out map, deko3d, stock clocks), the logs correct this time (build 1 stamp, every
+  log step ok): GX (old) path 23.9 fps (42 ms), 6,400 draws, the game thread 3.9 ms in the map draw then 34 ms
+  waiting for the FIFO processor; native (CPU) path 18.8 fps (53 ms), 800 draws, the map draw 43.4 ms: line
+  expansion 13.5 ms, GX writes 25.8 ms for 290,000 vertices ("23601 fill vertices, 22634 outline segments, 3680
+  runs, 295209 vertices drawn"), queueing 2.1 ms. The GPU side fell from 37 ms to 6.4 ms; the cost moved to the
+  CPU.
+- Cause: the native path still fed Aurora the GameCube way, every vertex every frame through the GX FIFO, and
+  widened every outline on the CPU (two matrix inversions a corner, both windings when culling is on).
+- The owner: the Switch's best, not Aurora's way. So the map now has its own GPU draw (aurora_map_draw, gx.cpp, a
+  custom draw in the EFB pass): each fill triangle or outline segment is one instance (44 bytes, world space, its
+  colour; AuroraMapInstance in aurora/gfx.h), copied to the GPU in one block; the vertex shader transforms them
+  and widens segments into Aurora's line quads (the same maths as gx/shader.cpp's line mode), 12 vertices an
+  instance (the second winding only when culling is on). Blend, depth, cull and polygon offset are the GX state
+  in force at the flush. One draw a flush; the CPU only builds the instance list. A flush Aurora refuses (HDR
+  scene pass, constant dst alpha, a full buffer) is drawn build 1's CPU way, with the reason on stderr.
+- The A/B (NATIVE now meaning the GPU path) and the on-screen label stay.
+
 ## 2026-11-08: build stamps, checked logging, a live map A/B label
 
 - The owner ran the A/B map build (his SD copy: 72,965,203 bytes, the same as the build; checked here: same SHA-256,
