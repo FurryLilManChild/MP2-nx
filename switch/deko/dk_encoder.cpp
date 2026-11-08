@@ -182,11 +182,44 @@ struct Enc {
     bool finished = false;
 };
 
+// mp2-nx (the map-speed build): what this pass has set so far, as recorded. WebGPU keeps a pass's state from
+// one draw to the next, and Aurora sets everything again for every draw (map screen: 6,370 draws, 36,000 calls a
+// frame, 24 ms of recording; log of 2026-11-07). A call that sets what is already set is not recorded; one that
+// names the object already set takes it from here (no lookup under the object lock, no second hold).
+struct RecState {
+    WGPURenderPipeline pipe = nullptr;
+    struct Group {
+        WGPUBindGroup h = nullptr;
+        BindGroup* g = nullptr;
+        uint32_t dynCount = 0;
+        uint32_t dyn[8] = {};
+        bool set = false;
+    } groups[4];
+    struct Vb {
+        WGPUBuffer h = nullptr;
+        Buf* b = nullptr;
+        uint64_t offset = 0, size = 0;
+        uint32_t format = 0;
+        bool set = false;
+    } vb[8], ib;
+    float blend[4] = {0.f, 0.f, 0.f, 0.f};  // (a render pass starts with a blend constant of 0)
+    float vp[6] = {};
+    bool vpSet = false;
+    uint32_t sc[4] = {};
+    bool scSet = false;
+    uint8_t imm[256] = {};
+    uint64_t immKnown[4] = {};  // one bit per byte of imm
+};
+
 struct PassEnc {
     std::atomic<int32_t> refs{1};
     Enc* enc = nullptr;
     bool compute = false;
+    RecState st;
 };
+
+std::atomic<uint64_t> g_recSkipped{0};  // calls not recorded (they set what was set)
+std::atomic<uint32_t> g_opsHint{0};     // the ops of a recent encoder (a new one reserves that many)
 
 Enc* enc_of(WGPUCommandEncoder e) { return reinterpret_cast<Enc*>(e); }
 PassEnc* pass_of(WGPURenderPassEncoder p) { return reinterpret_cast<PassEnc*>(p); }
@@ -196,6 +229,10 @@ void tex_retain(Tex* t) { dko::retain(t); }
 void tex_release(Tex* t) { dko::release(t); }
 
 void enc_free(Enc* e) {
+    {
+        const uint32_t n = uint32_t(std::min<size_t>(e->ops.size(), 65536));
+        if (n > g_opsHint.load(std::memory_order_relaxed)) g_opsHint.store(n, std::memory_order_relaxed);
+    }
     for (View* v : e->views) dko::release(v);
     for (BindGroup* g : e->groups) dko::release(g);
     for (Buf* b : e->bufs) buffer_release(b);
@@ -1727,7 +1764,7 @@ void perf_tick() {
     if (!kOn) return;
     struct Snap {
         uint64_t t = 0, frames = 0, draws = 0, rec = 0, recCalls = 0, write = 0, writeBytes = 0, lockWait = 0;
-        uint64_t replay = 0, queueOps = 0, busy = 0, gameWait = 0;
+        uint64_t replay = 0, queueOps = 0, busy = 0, gameWait = 0, skipped = 0;
         uint64_t op[17] = {}, opCount[17] = {};
     };
     static Snap last;
@@ -1754,6 +1791,7 @@ void perf_tick() {
     cur.lockWait = g_perf.lockWait.load();
     cur.replay = g_perf.replay.load();
     cur.queueOps = g_perf.queueOps.load();
+    cur.skipped = g_recSkipped.load();
     aurora_render_worker_times(&cur.busy, &cur.gameWait);
     for (int i = 0; i < 17; i++) {
         cur.op[i] = g_perf.op[i].load();
@@ -1787,10 +1825,11 @@ void perf_tick() {
         }
         if (len == 0) snprintf(ops, sizeof ops, "nothing");
         log("cpu: %.1f fps (%.2f ms a frame, %.0f draws); render worker busy %.2f ms, the game thread waited for it "
-            "%.2f ms; in the bridge: recording %.2f ms (%.0f calls), replay %.2f ms (queue writes %.2f ms; %s), buffer "
+            "%.2f ms; in the bridge: recording %.2f ms (%.0f calls, %.0f of them skipped: already set), replay %.2f ms (queue writes %.2f ms; %s), buffer "
             "writes %.2f ms (%.2f MiB), submit lock waits %.2f ms (per frame)",
             fps, frameMs, double(cur.draws - last.draws) / n, msn(cur.busy - last.busy), msn(cur.gameWait - last.gameWait),
-            ms(cur.rec, last.rec), double(cur.recCalls - last.recCalls) / n, ms(cur.replay, last.replay),
+            ms(cur.rec, last.rec), double(cur.recCalls - last.recCalls) / n, double(cur.skipped - last.skipped) / n,
+            ms(cur.replay, last.replay),
             ms(cur.queueOps, last.queueOps), ops, ms(cur.write, last.write),
             double(cur.writeBytes - last.writeBytes) / n / 1048576.0, ms(cur.lockWait, last.lockWait));
         if (lines == 400) log("cpu: 400 lines; no more this session");
@@ -1828,7 +1867,11 @@ extern "C" {
 // ---- command encoders
 WGPUCommandEncoder __wrap_wgpuDeviceCreateCommandEncoder(WGPUDevice device, WGPUCommandEncoderDescriptor const* d) {
     if (!on()) return __real_wgpuDeviceCreateCommandEncoder(device, d);
-    return reinterpret_cast<WGPUCommandEncoder>(new Enc);
+    auto* enc = new Enc;
+    // (the map's encoder grows to 36,000 ops: reserved from the largest seen, so it never copies itself)
+    const uint32_t hint = g_opsHint.load(std::memory_order_relaxed);
+    if (hint > 256) enc->ops.reserve(hint + hint / 8);
+    return reinterpret_cast<WGPUCommandEncoder>(enc);
 }
 
 void __wrap_wgpuCommandEncoderRelease(WGPUCommandEncoder e) {
@@ -1902,7 +1945,13 @@ void __wrap_wgpuRenderPassEncoderRelease(WGPURenderPassEncoder p) {
 void __wrap_wgpuRenderPassEncoderSetPipeline(WGPURenderPassEncoder p, WGPURenderPipeline pipeline) {
     if (!on()) return __real_wgpuRenderPassEncoderSetPipeline(p, pipeline);
     RecScope rec_;
-    Enc* enc = pass_of(p)->enc;
+    PassEnc* pe = pass_of(p);
+    if (pe->st.pipe == pipeline && pipeline) {
+        g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    pe->st.pipe = pipeline;
+    Enc* enc = pe->enc;
     RPipe* pipe = find_render_pipeline(pipeline);
     if (pipe) {
         pipeline_retain(pipe);
@@ -1915,12 +1964,30 @@ void __wrap_wgpuRenderPassEncoderSetBindGroup(WGPURenderPassEncoder p, uint32_t 
                                               size_t dynCount, uint32_t const* dyn) {
     if (!on()) return __real_wgpuRenderPassEncoderSetBindGroup(p, index, group, dynCount, dyn);
     RecScope rec_;
-    Enc* enc = pass_of(p)->enc;
-    BindGroup* g = dko::find_bind_group(group);
-    if (g && !dko::alive(g, "set on a pass")) g = nullptr;
-    if (g) {
-        dko::retain(g);
-        enc->groups.push_back(g);
+    PassEnc* pe = pass_of(p);
+    Enc* enc = pe->enc;
+    BindGroup* g = nullptr;
+    RecState::Group* sg = index < 4 ? &pe->st.groups[index] : nullptr;
+    if (sg && sg->set && sg->h == group && group) {
+        if (sg->dynCount == dynCount && dynCount <= 8 && (dynCount == 0 || memcmp(sg->dyn, dyn, dynCount * 4) == 0)) {
+            g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        g = sg->g;  // (held by this encoder since it was first set)
+    } else {
+        g = dko::find_bind_group(group);
+        if (g && !dko::alive(g, "set on a pass")) g = nullptr;
+        if (g) {
+            dko::retain(g);
+            enc->groups.push_back(g);
+        }
+    }
+    if (sg) {
+        sg->set = dynCount <= 8;
+        sg->h = group;
+        sg->g = g;
+        sg->dynCount = uint32_t(dynCount);
+        if (dynCount && dynCount <= 8) memcpy(sg->dyn, dyn, dynCount * 4);
     }
     const uint32_t at = dynCount ? push_words(enc, dyn, dynCount * 4) : 0;
     Op& op = add(enc, OpType::SetBindGroup);
@@ -1934,9 +2001,26 @@ void __wrap_wgpuRenderPassEncoderSetVertexBuffer(WGPURenderPassEncoder p, uint32
                                                  uint64_t offset, uint64_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetVertexBuffer(p, slot, buffer, offset, size);
     RecScope rec_;
-    Enc* enc = pass_of(p)->enc;
+    PassEnc* pe = pass_of(p);
+    Enc* enc = pe->enc;
+    Buf* held = nullptr;
+    if (slot < 8) {
+        RecState::Vb& v = pe->st.vb[slot];
+        if (v.set && v.h == buffer && buffer) {
+            if (v.offset == offset && v.size == size) {
+                g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            held = v.b;
+        } else {
+            held = buffer ? hold(enc, buffer) : nullptr;
+        }
+        v = {buffer, held, offset, size, 0, true};
+    } else {
+        held = buffer ? hold(enc, buffer) : nullptr;
+    }
     Op& op = add(enc, OpType::SetVertexBuffer);
-    op.p = buffer ? hold(enc, buffer) : nullptr;
+    op.p = held;
     op.u[0] = slot;
     op.q[0] = offset;
     op.q[1] = size;
@@ -1946,9 +2030,22 @@ void __wrap_wgpuRenderPassEncoderSetIndexBuffer(WGPURenderPassEncoder p, WGPUBuf
                                                 uint64_t offset, uint64_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetIndexBuffer(p, buffer, format, offset, size);
     RecScope rec_;
-    Enc* enc = pass_of(p)->enc;
+    PassEnc* pe = pass_of(p);
+    Enc* enc = pe->enc;
+    RecState::Vb& v = pe->st.ib;
+    Buf* held = nullptr;
+    if (v.set && v.h == buffer && buffer) {
+        if (v.offset == offset && v.size == size && v.format == uint32_t(format)) {
+            g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        held = v.b;
+    } else {
+        held = hold(enc, buffer);
+    }
+    v = {buffer, held, offset, size, uint32_t(format), true};
     Op& op = add(enc, OpType::SetIndexBuffer);
-    op.p = hold(enc, buffer);
+    op.p = held;
     op.u[0] = uint32_t(format);
     op.q[0] = offset;
     op.q[1] = size;
@@ -1982,7 +2079,15 @@ void __wrap_wgpuRenderPassEncoderSetViewport(WGPURenderPassEncoder p, float x, f
                                              float maxDepth) {
     if (!on()) return __real_wgpuRenderPassEncoderSetViewport(p, x, y, w, h, minDepth, maxDepth);
     RecScope rec_;
-    Op& op = add(pass_of(p)->enc, OpType::Viewport);
+    PassEnc* pe = pass_of(p);
+    const float vp[6] = {x, y, w, h, minDepth, maxDepth};
+    if (pe->st.vpSet && memcmp(pe->st.vp, vp, sizeof vp) == 0) {
+        g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    memcpy(pe->st.vp, vp, sizeof vp);
+    pe->st.vpSet = true;
+    Op& op = add(pe->enc, OpType::Viewport);
     op.f[0] = x;
     op.f[1] = y;
     op.f[2] = w;
@@ -1994,7 +2099,15 @@ void __wrap_wgpuRenderPassEncoderSetViewport(WGPURenderPassEncoder p, float x, f
 void __wrap_wgpuRenderPassEncoderSetScissorRect(WGPURenderPassEncoder p, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
     if (!on()) return __real_wgpuRenderPassEncoderSetScissorRect(p, x, y, w, h);
     RecScope rec_;
-    Op& op = add(pass_of(p)->enc, OpType::Scissor);
+    PassEnc* pe = pass_of(p);
+    const uint32_t sc[4] = {x, y, w, h};
+    if (pe->st.scSet && memcmp(pe->st.sc, sc, sizeof sc) == 0) {
+        g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    memcpy(pe->st.sc, sc, sizeof sc);
+    pe->st.scSet = true;
+    Op& op = add(pe->enc, OpType::Scissor);
     op.u[0] = x;
     op.u[1] = y;
     op.u[2] = w;
@@ -2004,7 +2117,14 @@ void __wrap_wgpuRenderPassEncoderSetScissorRect(WGPURenderPassEncoder p, uint32_
 void __wrap_wgpuRenderPassEncoderSetBlendConstant(WGPURenderPassEncoder p, WGPUColor const* c) {
     if (!on()) return __real_wgpuRenderPassEncoderSetBlendConstant(p, c);
     RecScope rec_;
-    Op& op = add(pass_of(p)->enc, OpType::BlendConstant);
+    PassEnc* pe = pass_of(p);
+    const float bc[4] = {float(c->r), float(c->g), float(c->b), float(c->a)};
+    if (memcmp(pe->st.blend, bc, sizeof bc) == 0) {
+        g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    memcpy(pe->st.blend, bc, sizeof bc);
+    Op& op = add(pe->enc, OpType::BlendConstant);
     op.f[0] = float(c->r);
     op.f[1] = float(c->g);
     op.f[2] = float(c->b);
@@ -2014,7 +2134,20 @@ void __wrap_wgpuRenderPassEncoderSetBlendConstant(WGPURenderPassEncoder p, WGPUC
 void __wrap_wgpuRenderPassEncoderSetImmediates(WGPURenderPassEncoder p, uint32_t offset, void const* data, size_t size) {
     if (!on()) return __real_wgpuRenderPassEncoderSetImmediates(p, offset, data, size);
     RecScope rec_;
-    Enc* enc = pass_of(p)->enc;
+    PassEnc* pe = pass_of(p);
+    Enc* enc = pe->enc;
+    if (size > 0 && offset + size <= 256) {
+        RecState& st = pe->st;
+        bool known = true;
+        for (size_t k = offset; k < offset + size && known; k++)
+            known = (st.immKnown[k >> 6] >> (k & 63)) & 1;
+        if (known && memcmp(st.imm + offset, data, size) == 0) {
+            g_recSkipped.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        memcpy(st.imm + offset, data, size);
+        for (size_t k = offset; k < offset + size; k++) st.immKnown[k >> 6] |= 1ull << (k & 63);
+    }
     const uint32_t at = push_words(enc, static_cast<const uint8_t*>(data), size);
     Op& op = add(enc, OpType::Immediates);
     op.u[0] = offset;

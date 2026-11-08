@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-07: scan visor fixed; the map's cost found; the recorder skips repeated state; Vulkan boot screen
+
+- Scan visor: works (the owner). The log had 30 "Dawn handed back view #54 of 'Render texture' 1279x720, which the game
+  still holds (game refs 9-11), for a CreateView that differs": old type 2 (2D, an explicit 2D dimension), new type
+  0 (an undefined dimension, the image's own type). Dawn's cache treats both as the same view; the white-texture
+  fix's comparison did not, replaced the shadow, and the game's next release killed it. The game-refs rule fixes it.
+- Map, Hive Transport Area zoomed out: 19-20 fps, 6,370 draws; render worker busy 51-52 ms of a 51-52 ms frame,
+  the game thread never waits. Of it: bridge recording 24 ms (36,300 calls, 0.67 us each: a lock and a table search
+  per call), replay 10 ms (draw indexed 6.5 ms at 1.0 us each, then blend constant, immediates, index buffer, bind
+  group), the rest (about 18 ms) Aurora's own work. A same-view pair of captures (cap007 deko3d, cap008 Vulkan) has
+  750 draws on both: no batching difference between the renderers.
+- This build: each render pass encoder keeps what it has set (RecState); a call that sets the same pipeline,
+  bind group with the same dynamic offsets, vertex or index buffer range, viewport, scissor, blend constant or
+  immediates bytes is not recorded (g_recSkipped); the same object with new offsets reuses the held pointer (no
+  lookup). New encoders reserve ops from the largest recent one. The "cpu:" line counts the skipped calls.
+- Vulkan boot screen (the owner asked): webgpu/gpu.cpp boot_screen draws the shared picture
+  (switch/source/platform/boot_screen.cpp, moved out of dk_surface.cpp) into a texture and onto the surface with a
+  one-triangle pass; its frames, every surface Configure and the game's first acquire (aurora.cpp, boot_screen_stop)
+  share one mutex. MP2_BOOT_SCREEN=0 turns it off.
+
 ## 2026-11-07: the map and scan-visor diagnostics build
 
 - Boot-time build results: the stored pipelines were ready 5152 ms after the cache started (10138 before; 3

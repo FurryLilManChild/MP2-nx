@@ -13,10 +13,20 @@ index e640c6221..da641f71d 100644
    uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
    uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
 diff --git a/lib/aurora.cpp b/lib/aurora.cpp
-index b7f692cbf..2b143a69e 100644
+index b7f692cbf..eb3bb27e8 100644
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
-@@ -827,7 +827,15 @@ void aurora_shutdown() { aurora::shutdown(); }
+@@ -609,6 +609,9 @@ void end_frame() noexcept {
+     }
+     {
+       window::SurfaceLock surfaceLock;
++#ifdef __SWITCH__
++      webgpu::boot_screen_stop();  // mp2-nx: the Vulkan boot screen ends at the game's first acquire
++#endif
+       if (!skipPresent && window::is_presentable() && g_surface) {
+         ZoneScopedN("Acquire texture");
+         phase::set(phase::Render, "surface GetCurrentTexture");
+@@ -827,7 +830,15 @@ void aurora_shutdown() { aurora::shutdown(); }
  const AuroraEvent* aurora_update() { return aurora::update(); }
  bool aurora_begin_frame() { return aurora::begin_frame(); }
  void aurora_release_lost_surface() { aurora::release_lost_surface(); }
@@ -1390,10 +1400,19 @@ index 0c65cc1be..0b8a7f239 100644
  public:
    Thread() noexcept = default;
 diff --git a/lib/webgpu/gpu.cpp b/lib/webgpu/gpu.cpp
-index a4bd6e697..966389cbb 100644
+index a4bd6e697..3c6209434 100644
 --- a/lib/webgpu/gpu.cpp
 +++ b/lib/webgpu/gpu.cpp
-@@ -30,6 +30,14 @@
+@@ -14,6 +14,8 @@
+ #include <utility>
+ #include <chrono>
+ #include <vector>
++#include <mutex>
++#include <thread>
+ 
+ #include <aurora/aurora.h>
+ #include <aurora/webgpu.hpp>
+@@ -30,6 +32,14 @@
  #include "../internal.hpp"
  #include "../window.hpp"
  #include "gpu_prof.hpp"
@@ -1408,7 +1427,138 @@ index a4bd6e697..966389cbb 100644
  
  #ifdef WEBGPU_DAWN
  #include "../dawn/TracyPlatform.hpp"
-@@ -994,6 +1002,13 @@ bool surface_window_changed() {
+@@ -50,6 +60,130 @@ wgpu::Surface g_surface;
+ wgpu::BackendType g_backendType;
+ bool g_vulkanLibraryFailed = false;
+ GraphicsConfig g_graphicsConfig;
++#ifdef __SWITCH__
++// ---- mp2-nx (the boot-time build): the Vulkan boot screen
++// The deko3d renderer shows a boot screen from its swapchain's creation to the game's first frame
++// (switch/deko/dk_surface.cpp); with Vulkan this does the same through Dawn: the picture
++// (switch/source/platform/boot_screen.cpp) is written into a texture and drawn into the surface by a
++// one-triangle pass about 15 times a second. Each frame is acquired and presented in one hold of g_mutex, which
++// the game's first acquire (boot_screen_stop) and every surface Configure also take, so the boot screen never
++// meets a frame of the game's. MP2_BOOT_SCREEN=0 turns it off.
++extern "C" void mp2nx_boot_screen_draw(uint32_t* px, uint32_t w, uint32_t h);  // boot_screen.cpp
++namespace boot_screen {
++std::mutex g_mutex;
++bool g_gameOwns = false;
++bool g_started = false;
++
++void run() {
++  constexpr const char* kWgsl = R"(
++@group(0) @binding(0) var picture: texture_2d<f32>;
++@vertex fn vs_main(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
++  let p = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
++  return vec4f(p * vec2f(4.0, -4.0) + vec2f(-1.0, 1.0), 0.0, 1.0);
++}
++@fragment fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
++  return textureLoad(picture, vec2i(pos.xy), 0);
++}
++)";
++  wgpu::ShaderSourceWGSL wgsl{};
++  wgsl.code = kWgsl;
++  const wgpu::ShaderModuleDescriptor moduleDesc{.nextInChain = &wgsl, .label = "Boot screen"};
++  const wgpu::ShaderModule module = g_device.CreateShaderModule(&moduleDesc);
++  const wgpu::ColorTargetState target{.format = g_graphicsConfig.surfaceConfiguration.format};
++  const wgpu::FragmentState fragment{.module = module, .entryPoint = "fs_main", .targetCount = 1, .targets = &target};
++  const wgpu::RenderPipelineDescriptor pipeDesc{
++      .label = "Boot screen",
++      .vertex = {.module = module, .entryPoint = "vs_main"},
++      .fragment = &fragment,
++  };
++  const wgpu::RenderPipeline pipe = g_device.CreateRenderPipeline(&pipeDesc);
++  wgpu::Texture tex;
++  wgpu::BindGroup group;
++  std::vector<uint32_t> px;
++  uint32_t tw = 0, th = 0;
++  uint32_t frames = 0;
++  const auto start = std::chrono::steady_clock::now();
++  for (;;) {
++    {
++      std::lock_guard lock{g_mutex};
++      if (g_gameOwns) {
++        break;
++      }
++      if (std::chrono::steady_clock::now() - start > std::chrono::minutes(2)) {
++        Log.warn("boot screen: still up after two minutes; it stops");
++        break;
++      }
++      wgpu::SurfaceTexture st;
++      g_surface.GetCurrentTexture(&st);
++      if (st.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
++          st.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal) {
++        Log.warn("boot screen: no surface texture ({}); it stops", magic_enum::enum_name(st.status));
++        break;
++      }
++      const uint32_t w = st.texture.GetWidth(), h = st.texture.GetHeight();
++      if (w != tw || h != th) {
++        const wgpu::TextureDescriptor td{
++            .label = "Boot screen picture",
++            .usage = wgpu::TextureUsage::TextureBinding | wgpu::TextureUsage::CopyDst,
++            .size = {w, h, 1},
++            .format = wgpu::TextureFormat::RGBA8Unorm,
++        };
++        tex = g_device.CreateTexture(&td);
++        const wgpu::BindGroupEntry entry{.binding = 0, .textureView = tex.CreateView()};
++        const wgpu::BindGroupDescriptor bgd{.layout = pipe.GetBindGroupLayout(0), .entryCount = 1, .entries = &entry};
++        group = g_device.CreateBindGroup(&bgd);
++        px.assign(size_t(w) * h, 0);
++        tw = w;
++        th = h;
++      }
++      mp2nx_boot_screen_draw(px.data(), w, h);
++      const wgpu::TexelCopyTextureInfo dst{.texture = tex};
++      const wgpu::TexelCopyBufferLayout layout{.bytesPerRow = w * 4, .rowsPerImage = h};
++      const wgpu::Extent3D extent{w, h, 1};
++      g_queue.WriteTexture(&dst, px.data(), px.size() * 4, &layout, &extent);
++      const wgpu::RenderPassColorAttachment color{
++          .view = st.texture.CreateView(),
++          .loadOp = wgpu::LoadOp::Clear,
++          .storeOp = wgpu::StoreOp::Store,
++          .clearValue = {0.0, 0.0, 0.0, 1.0},
++      };
++      const wgpu::RenderPassDescriptor passDesc{.colorAttachmentCount = 1, .colorAttachments = &color};
++      const wgpu::CommandEncoder enc = g_device.CreateCommandEncoder();
++      const wgpu::RenderPassEncoder pass = enc.BeginRenderPass(&passDesc);
++      pass.SetPipeline(pipe);
++      pass.SetBindGroup(0, group);
++      pass.Draw(3);
++      pass.End();
++      const wgpu::CommandBuffer cmd = enc.Finish();
++      g_queue.Submit(1, &cmd);
++      g_surface.Present();
++      if (frames++ == 0) {
++        Log.info("boot screen (Vulkan): first frame, {}x{}", w, h);
++      }
++    }
++    std::this_thread::sleep_for(std::chrono::milliseconds(66));
++  }
++  Log.info("boot screen (Vulkan): {} frames", frames);
++}
++
++void start() {
++  if (g_started) {
++    return;
++  }
++  g_started = true;
++  if (const char* e = std::getenv("MP2_BOOT_SCREEN"); e != nullptr && *e == '0') {
++    Log.info("boot screen (Vulkan): off (MP2_BOOT_SCREEN=0)");
++    return;
++  }
++  std::thread(run).detach();
++}
++} // namespace boot_screen
++
++void boot_screen_stop() {
++  std::lock_guard lock{boot_screen::g_mutex};
++  boot_screen::g_gameOwns = true;
++}
++#endif
+ TextureWithSampler g_frameBuffer;
+ TextureWithSampler g_frameBufferResolved;
+ TextureWithSampler g_sceneHdr;
+@@ -994,6 +1128,13 @@ bool surface_window_changed() {
  static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu);
  
  bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
@@ -1422,7 +1572,7 @@ index a4bd6e697..966389cbb 100644
    if (initialize_once(auroraBackend, allowCpu)) {
      return true;
    }
-@@ -1099,7 +1114,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1099,7 +1240,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
          .featureLevel = wgpu::FeatureLevel::Compatibility,
          .powerPreference = lowPower ? wgpu::PowerPreference::LowPower : wgpu::PowerPreference::HighPerformance,
          .backendType = backend,
@@ -1434,7 +1584,7 @@ index a4bd6e697..966389cbb 100644
      };
      Log.info("Requesting adapter\n  Feature level: {}\n  Power preference: {}\n  Backend: {}\n  Compatible surface: {}",
               magic_enum::enum_name(options.featureLevel), magic_enum::enum_name(options.powerPreference),
-@@ -1156,6 +1175,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1156,6 +1301,11 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
      description = wgpu::StringView("Unknown");
    }
    g_backendType = g_adapterInfo.backendType;
@@ -1446,7 +1596,7 @@ index a4bd6e697..966389cbb 100644
    const auto backendName = magic_enum::enum_name(g_backendType);
    auto vendorName = g_adapterInfo.vendor;
    if (vendorName.IsUndefined()) {
-@@ -1542,6 +1566,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1542,6 +1692,9 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
      g_device.SetLoggingCallback(wgpu_log);
    }
    g_queue = g_device.GetQueue();
@@ -1456,7 +1606,20 @@ index a4bd6e697..966389cbb 100644
  
    if (headless()) {
      // Port: AURORA_HEADLESS: no surface to ask; the framebuffers are made as usual.
-@@ -1619,6 +1646,7 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+@@ -1612,6 +1765,12 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
+   create_resample_pipeline();
+   gpu_prof::initialize();
+   resize_swapchain(size.fb_width, size.fb_height, size.native_fb_width, size.native_fb_height, true);
++#if defined(__SWITCH__)
++#if defined(MP2NX_DEKO3D)
++  if (!mp2nx_dk_active())
++#endif
++    boot_screen::start();  // mp2-nx: Vulkan's boot screen (deko3d has its own)
++#endif
+   g_initialized = true;
+   return true;
+ }
+@@ -1619,6 +1778,7 @@ static bool initialize_once(AuroraBackend auroraBackend, bool allowCpu) {
  void shutdown() {
    g_initialized = false;
    gfx::gpu_synchronize();
@@ -1464,6 +1627,31 @@ index a4bd6e697..966389cbb 100644
    gpu_prof::shutdown();
    g_CopyBindGroupLayout = {};
    g_CopyPipeline = {};
+@@ -1695,6 +1855,9 @@ static void resize_swapchain_internal(uint32_t width, uint32_t height, uint32_t
+     surfaceConfiguration.device = g_device;
+     if (g_surface) { // Port: AURORA_HEADLESS has no surface
+       window::SurfaceLock surfaceLock;
++#ifdef __SWITCH__
++      std::lock_guard bootLock{boot_screen::g_mutex};  // mp2-nx: never under the boot screen's frame
++#endif
+       g_surface.Configure(&surfaceConfiguration);
+     }
+   }
+diff --git a/lib/webgpu/gpu.hpp b/lib/webgpu/gpu.hpp
+index b4238dcbd..acd9e79e6 100644
+--- a/lib/webgpu/gpu.hpp
++++ b/lib/webgpu/gpu.hpp
+@@ -73,6 +73,10 @@ extern bool g_dualSourceBlendingSupported;
+ 
+ bool initialize(AuroraBackend backend, bool allowCpu);
+ void shutdown();
++#ifdef __SWITCH__
++// mp2-nx (the boot-time build): the Vulkan boot screen ends; called before the game's first acquire (aurora.cpp)
++void boot_screen_stop();
++#endif
+ void release_surface() noexcept;
+ bool refresh_surface(bool recreate = true);
+ // True when the live surface is bound to a native window that no longer matches
 diff --git a/lib/webgpu/gpu_cache.cpp b/lib/webgpu/gpu_cache.cpp
 index d64d2c2f2..d33bc9521 100644
 --- a/lib/webgpu/gpu_cache.cpp
