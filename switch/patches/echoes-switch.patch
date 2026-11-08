@@ -79,6 +79,38 @@ index ef1c8c60d..53b70f3c6 100644
 +            OUTPUT ${CMAKE_BINARY_DIR}/${MP2NX_APP_NAME}.nro)
 +    endif()
 +endif()
+diff --git a/include/MetroidPrime/CMapArea.hpp b/include/MetroidPrime/CMapArea.hpp
+index 97ff568bc..ae6075e0b 100644
+--- a/include/MetroidPrime/CMapArea.hpp
++++ b/include/MetroidPrime/CMapArea.hpp
+@@ -24,6 +24,13 @@ public:
+     void Draw(const CVector3f* verts, const CColor& surfColor, const CColor& lineColor,
+               float lineWidth) const;
+     void PostConstruct(const void* buf);
++#ifdef TARGET_PC
++    // mp2-nx (the native map build): Draw's surfaces and outlines, queued as world-space triangles for one
++    // batched draw (CMapArea::FlushNativeBatch) instead of a GX draw per primitive. xf: the area's model
++    // transform (the plane projection x the area's post transform), verts: the area's host-order vertices.
++    void DrawNative(const CTransform4f& xf, const CVector3f* verts, const CColor& surfColor,
++                    const CColor& lineColor, float lineWidth) const;
++#endif
+     CVector3f GetNormal() const { return mNormal; }
+     CVector3f GetCenterPosition() const { return mCentroid; }
+ 
+@@ -56,6 +63,13 @@ public:
+   const CVector3f& GetAreaPostTranslate(const IWorld& world);
+   // Guessed names for the prepared surface/outline/door rendering path.
+   static void SetupLighting(const CTransform4f& cameraXf);
++#ifdef TARGET_PC
++  // mp2-nx (the native map build): draws what DrawNative queued, in order, and restores the GX state the
++  // per-primitive path would have left (the surface material, the last line width and K colour). Nothing
++  // queued: nothing done. NativeMapEnabled: MP2_NATIVE_MAP=0 (deko3d_env.txt) keeps the GX path.
++  static void FlushNativeBatch();
++  static bool NativeMapEnabled();
++#endif
+   void Draw(const CColor& surfaceColor, const CColor& outlineColor, const CTransform4f& areaXf,
+             const CTransform4f& modelXf, int selArea, const CMapWorldInfo& info, float alpha) const;
+   const CAABox& GetBoundingBox() const { return mBox; }
 diff --git a/platform/debug_ui/window.cpp b/platform/debug_ui/window.cpp
 index 2b05502ac..c9b72c552 100644
 --- a/platform/debug_ui/window.cpp
@@ -465,6 +497,418 @@ index 468523c04..29ccf33a4 100644
 +#endif
    CGraphics::SetIsBeginSceneClearFb(true);
    gResFactoryUnknown = 2;
+ }
+diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
+index 3d4fe910a..9ac4967bc 100644
+--- a/src/MetroidPrime/CMapArea.cpp
++++ b/src/MetroidPrime/CMapArea.cpp
+@@ -15,6 +15,7 @@
+ #include "Kyoto/Graphics/CGX.hpp"
+ #include "Kyoto/Graphics/CGraphics.hpp"
+ #include "Kyoto/Graphics/CLight.hpp"
++#include "Kyoto/Math/CMath.hpp"
+ #include "Kyoto/Streams/CInputStream.hpp"
+ #include "Kyoto/Streams/CMemoryStreamOut.hpp"
+ 
+@@ -542,3 +543,333 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
+ #endif
+   return rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
+ }
++
++#ifdef TARGET_PC
++// ---- mp2-nx (the native map build): the map screen's surfaces in a few draws
++// The map screen (CMapWorld::DrawAreas, sorted) drew every surface of every visible room through GX, a draw
++// per primitive: about 6,400 draws on a zoomed-out map, which Aurora translated one by one on the game thread
++// (31 ms) and the render worker encoded one by one (26 ms on Vulkan): 23 to 25 fps on both renderers (log of
++// 2026-11-08). The rooms' shapes never change; only their colours, fade and transform do. So each surface
++// queues its triangles here, in world space with a colour each, and FlushNativeBatch draws the whole queue as
++// GX_TRIANGLES in a handful of draws, in the same order, so the blending is the same. Outlines are GX lines,
++// which Aurora draws as screen-space quads (gx/shader.cpp, lineMode 1/2): the same quads are built here from the
++// state Aurora reports (aurora_gx_drawing_state) and taken back to world space, so they land on the same pixels.
++#include <cstdlib>
++#include <vector>
++
++extern "C" void aurora_gx_drawing_state(float pn[12], float proj[16], float vp[4], float* lineWidth,
++                                        int* cullMode);  // Aurora's gx/gx.cpp (mp2-nx)
++
++namespace {
++struct NativeVtx {
++  float x, y, z;
++  GXColor c;
++};
++struct NativeSeg {
++  CVector3f a, b;
++  GXColor c;
++  float width;  // logical pixels; < 0: the GX line width in force (the thin outline path never sets one)
++};
++// The queue in draw order: a run of fill vertices (gFill) or of outline segments (gSegs).
++struct NativeRun {
++  bool lines;
++  uint first, count;
++};
++std::vector< NativeVtx > gFill;
++std::vector< NativeSeg > gSegs;
++std::vector< NativeRun > gRuns;
++std::vector< NativeVtx > gOut;
++GXColor gLastK = {0, 0, 0, 0};
++float gLastSetWidth = -1.f;  // the last width the thick outline path set (CGraphics::SetLineWidth)
++
++void add_run(bool lines, uint count) {
++  const uint first = lines ? gSegs.size() - count : gFill.size() - count;
++  if (!gRuns.empty() && gRuns.back().lines == lines && gRuns.back().first + gRuns.back().count == first) {
++    gRuns.back().count += count;
++  } else {
++    NativeRun r = {lines, first, count};
++    gRuns.push_back(r);
++  }
++}
++
++inline void push_fill(const CTransform4f& xf, const CVector3f* verts, uchar i, GXColor c) {
++  const CVector3f p = xf * verts[i];
++  NativeVtx v = {p.GetX(), p.GetY(), p.GetZ(), c};
++  gFill.push_back(v);
++}
++
++bool invert4(const float m[16], float out[16]) {
++  float inv[16];
++  inv[0] = m[5] * m[10] * m[15] - m[5] * m[11] * m[14] - m[9] * m[6] * m[15] + m[9] * m[7] * m[14] +
++           m[13] * m[6] * m[11] - m[13] * m[7] * m[10];
++  inv[4] = -m[4] * m[10] * m[15] + m[4] * m[11] * m[14] + m[8] * m[6] * m[15] - m[8] * m[7] * m[14] -
++           m[12] * m[6] * m[11] + m[12] * m[7] * m[10];
++  inv[8] = m[4] * m[9] * m[15] - m[4] * m[11] * m[13] - m[8] * m[5] * m[15] + m[8] * m[7] * m[13] +
++           m[12] * m[5] * m[11] - m[12] * m[7] * m[9];
++  inv[12] = -m[4] * m[9] * m[14] + m[4] * m[10] * m[13] + m[8] * m[5] * m[14] - m[8] * m[6] * m[13] -
++            m[12] * m[5] * m[10] + m[12] * m[6] * m[9];
++  inv[1] = -m[1] * m[10] * m[15] + m[1] * m[11] * m[14] + m[9] * m[2] * m[15] - m[9] * m[3] * m[14] -
++           m[13] * m[2] * m[11] + m[13] * m[3] * m[10];
++  inv[5] = m[0] * m[10] * m[15] - m[0] * m[11] * m[14] - m[8] * m[2] * m[15] + m[8] * m[3] * m[14] +
++           m[12] * m[2] * m[11] - m[12] * m[3] * m[10];
++  inv[9] = -m[0] * m[9] * m[15] + m[0] * m[11] * m[13] + m[8] * m[1] * m[15] - m[8] * m[3] * m[13] -
++           m[12] * m[1] * m[11] + m[12] * m[3] * m[9];
++  inv[13] = m[0] * m[9] * m[14] - m[0] * m[10] * m[13] - m[8] * m[1] * m[14] + m[8] * m[2] * m[13] +
++            m[12] * m[1] * m[10] - m[12] * m[2] * m[9];
++  inv[2] = m[1] * m[6] * m[15] - m[1] * m[7] * m[14] - m[5] * m[2] * m[15] + m[5] * m[3] * m[14] +
++           m[13] * m[2] * m[7] - m[13] * m[3] * m[6];
++  inv[6] = -m[0] * m[6] * m[15] + m[0] * m[7] * m[14] + m[4] * m[2] * m[15] - m[4] * m[3] * m[14] -
++           m[12] * m[2] * m[7] + m[12] * m[3] * m[6];
++  inv[10] = m[0] * m[5] * m[15] - m[0] * m[7] * m[13] - m[4] * m[1] * m[15] + m[4] * m[3] * m[13] +
++            m[12] * m[1] * m[7] - m[12] * m[3] * m[5];
++  inv[14] = -m[0] * m[5] * m[14] + m[0] * m[6] * m[13] + m[4] * m[1] * m[14] - m[4] * m[2] * m[13] -
++            m[12] * m[1] * m[6] + m[12] * m[2] * m[5];
++  inv[3] = -m[1] * m[6] * m[11] + m[1] * m[7] * m[10] + m[5] * m[2] * m[11] - m[5] * m[3] * m[10] -
++           m[9] * m[2] * m[7] + m[9] * m[3] * m[6];
++  inv[7] = m[0] * m[6] * m[11] - m[0] * m[7] * m[10] - m[4] * m[2] * m[11] + m[4] * m[3] * m[10] +
++           m[8] * m[2] * m[7] - m[8] * m[3] * m[6];
++  inv[11] = -m[0] * m[5] * m[11] + m[0] * m[7] * m[9] + m[4] * m[1] * m[11] - m[4] * m[3] * m[9] -
++            m[8] * m[1] * m[7] + m[8] * m[3] * m[5];
++  inv[15] = m[0] * m[5] * m[10] - m[0] * m[6] * m[9] - m[4] * m[1] * m[10] + m[4] * m[2] * m[9] +
++            m[8] * m[1] * m[6] - m[8] * m[2] * m[5];
++  const double det = double(m[0]) * inv[0] + double(m[1]) * inv[4] + double(m[2]) * inv[8] + double(m[3]) * inv[12];
++  if (det == 0.0) {
++    return false;
++  }
++  for (int i = 0; i < 16; ++i) {
++    out[i] = float(inv[i] / det);
++  }
++  return true;
++}
++}  // namespace
++
++bool CMapArea::NativeMapEnabled() {
++  static const bool on = [] {
++    const char* e = std::getenv("MP2_NATIVE_MAP");
++    const bool enabled = e == nullptr || *e != '0';
++    OSReport("map: native map surfaces %s (MP2_NATIVE_MAP)\n", enabled ? "on" : "off");
++    return enabled;
++  }();
++  return on;
++}
++
++void CMapArea::CMapAreaSurface::DrawNative(const CTransform4f& xf, const CVector3f* verts,
++                                           const CColor& surfColor, const CColor& lineColor,
++                                           float lineWidth) const {
++  const bool hasSurfAlpha = surfColor.GetAlpha() > 0.0f;
++  const bool hasLineAlpha = lineColor.GetAlpha() > 0.0f;
++  const int numSurfaces = *mSurfOffset;
++  const int numOutlines = *mOutlineOffset;
++  if (hasSurfAlpha) {
++    const GXColor c = surfColor.GetGXColor();
++    gLastK = c;
++    const uint before = gFill.size();
++    const int* surface = &mSurfOffset[1];
++    for (int i = 0; i < numSurfaces; ++i) {
++      const GXPrimitive prim = static_cast< GXPrimitive >(*surface++);
++      const int n = *surface++;
++      const uchar* d = reinterpret_cast< const uchar* >(surface);
++      surface += ((n + 3) & ~3) / 4;
++      // The triangles Aurora makes of each primitive (gx/command_processor.cpp), in its order and winding.
++      if (prim == GX_TRIANGLES) {
++        for (int v = 0; v < n / 3 * 3; ++v) {
++          push_fill(xf, verts, d[v], c);
++        }
++      } else if (prim == GX_TRIANGLESTRIP && n >= 3) {
++        push_fill(xf, verts, d[0], c);
++        push_fill(xf, verts, d[1], c);
++        push_fill(xf, verts, d[2], c);
++        for (int v = 3; v < n; ++v) {
++          if ((v & 1) == 0) {
++            push_fill(xf, verts, d[v - 2], c);
++            push_fill(xf, verts, d[v - 1], c);
++          } else {
++            push_fill(xf, verts, d[v - 1], c);
++            push_fill(xf, verts, d[v - 2], c);
++          }
++          push_fill(xf, verts, d[v], c);
++        }
++      } else if (prim == GX_TRIANGLEFAN && n >= 3) {
++        push_fill(xf, verts, d[0], c);
++        push_fill(xf, verts, d[1], c);
++        push_fill(xf, verts, d[2], c);
++        for (int v = 3; v < n; ++v) {
++          push_fill(xf, verts, d[0], c);
++          push_fill(xf, verts, d[v - 1], c);
++          push_fill(xf, verts, d[v], c);
++        }
++      } else if (prim == GX_QUADS) {
++        for (int v = 0; v + 4 <= n; v += 4) {
++          push_fill(xf, verts, d[v], c);
++          push_fill(xf, verts, d[v + 1], c);
++          push_fill(xf, verts, d[v + 2], c);
++          push_fill(xf, verts, d[v + 2], c);
++          push_fill(xf, verts, d[v + 3], c);
++          push_fill(xf, verts, d[v], c);
++        }
++      }
++    }
++    if (gFill.size() > before) {
++      add_run(false, gFill.size() - before);
++    }
++  }
++  if (hasLineAlpha) {
++    const bool thickLine = lineWidth > 1.f;
++    for (int j = 0; j < (thickLine ? 1 : 0) + 1; ++j) {
++      float width = -1.f;
++      if (thickLine) {
++        // CGraphics::SetLineWidth: GX keeps the width in sixths of a pixel, in a byte
++        width = static_cast< float >(static_cast< uchar >((lineWidth - j) * 6.f)) / 6.f;
++        gLastSetWidth = lineWidth - j;
++      }
++      const GXColor c = lineColor.WithAlphaModulatedBy(thickLine ? 0.5f : 1.0f).GetGXColor();
++      gLastK = c;
++      const uint before = gSegs.size();
++      const int* outline = &mOutlineOffset[1];
++      for (int i = 0; i < numOutlines; ++i) {
++        const int n = *outline++;
++        const uchar* d = reinterpret_cast< const uchar* >(outline);
++        outline += ((n + 3) & ~3) / 4;
++        for (int v = 0; v + 1 < n; ++v) {
++          NativeSeg s = {xf * verts[d[v]], xf * verts[d[v + 1]], c, width};
++          gSegs.push_back(s);
++        }
++      }
++      if (gSegs.size() > before) {
++        add_run(true, gSegs.size() - before);
++      }
++    }
++  }
++}
++
++void CMapArea::FlushNativeBatch() {
++  if (gRuns.empty()) {
++    return;
++  }
++  // The batch is in world space: the model matrix is the identity, so the position matrix is the view.
++  CGraphics::SetIdentityModelMatrix();
++  float pn[12], proj[16], vp[4], gxWidth = 1.f;
++  int cull = GX_CULL_NONE;
++  aurora_gx_drawing_state(pn, proj, vp, &gxWidth, &cull);
++  // proj and the position matrix (as a 4x4) inverted: a line quad's corners, built in clip space, go back to
++  // world space, so the GPU's own transform puts them where Aurora's line shader would.
++  float pn4[16] = {pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7], pn[8], pn[9], pn[10], pn[11], 0.f, 0.f, 0.f, 1.f};
++  float projInv[16], pnInv[16];
++  const bool canLines = invert4(proj, projInv) && invert4(pn4, pnInv);
++  const float renderW = vp[0] > 0.f ? vp[0] : 1.f, renderH = vp[1] > 0.f ? vp[1] : 1.f;
++  const float scale = CMath::Min(renderW / CMath::Max(vp[2], 1.f), renderH / CMath::Max(vp[3], 1.f));
++  const bool bothWindings = cull != GX_CULL_NONE;  // (Aurora draws lines unculled; one winding survives)
++
++  gOut.clear();
++  for (int r = 0; r < gRuns.size(); ++r) {
++    const NativeRun& run = gRuns[r];
++    if (!run.lines) {
++      gOut.insert(gOut.end(), gFill.begin() + run.first, gFill.begin() + run.first + run.count);
++      continue;
++    }
++    if (!canLines) {
++      continue;
++    }
++    for (uint k = run.first; k < run.first + run.count; ++k) {
++      const NativeSeg& s = gSegs[k];
++      float clip[2][4];
++      const CVector3f* ends[2] = {&s.a, &s.b};
++      for (int e = 0; e < 2; ++e) {
++        const float wx = ends[e]->GetX(), wy = ends[e]->GetY(), wz = ends[e]->GetZ();
++        const float mv[4] = {pn[0] * wx + pn[1] * wy + pn[2] * wz + pn[3],
++                             pn[4] * wx + pn[5] * wy + pn[6] * wz + pn[7],
++                             pn[8] * wx + pn[9] * wy + pn[10] * wz + pn[11], 1.f};
++        for (int i = 0; i < 4; ++i) {
++          clip[e][i] = proj[i * 4] * mv[0] + proj[i * 4 + 1] * mv[1] + proj[i * 4 + 2] * mv[2] + proj[i * 4 + 3];
++        }
++      }
++      // gx/shader.cpp's line expansion
++      const float ndcAx = clip[0][0] / clip[0][3], ndcAy = clip[0][1] / clip[0][3];
++      const float ndcBx = clip[1][0] / clip[1][3], ndcBy = clip[1][1] / clip[1][3];
++      const float dx = (ndcBx - ndcAx) / 2.f * renderW, dy = (ndcBy - ndcAy) / 2.f * renderH;
++      float dirX = 1.f, dirY = 0.f;
++      const float len2 = dx * dx + dy * dy;
++      if (len2 > 1e-10f) {
++        const float inv = 1.f / CMath::SqrtF(len2);
++        dirX = dx * inv;
++        dirY = dy * inv;
++      }
++      const float lw = (s.width < 0.f ? gxWidth : s.width) * scale;
++      const float offX = -dirY * (lw / 2.f) * 2.f / renderW;
++      const float offY = dirX * (lw / 2.f) * 2.f / renderH;
++      // corners 0..3: a-, a+, b-, b+ (Aurora's vidx: bit 0 the side, 2 and 3 the b end)
++      NativeVtx corner[4];
++      for (int q = 0; q < 4; ++q) {
++        const float* base = clip[q >= 2 ? 1 : 0];
++        const float sign = (q & 1) != 0 ? 1.f : -1.f;
++        const float c4[4] = {base[0] + offX * sign * base[3], base[1] + offY * sign * base[3], base[2], base[3]};
++        float h[4];
++        for (int i = 0; i < 4; ++i) {
++          h[i] = projInv[i * 4] * c4[0] + projInv[i * 4 + 1] * c4[1] + projInv[i * 4 + 2] * c4[2] +
++                 projInv[i * 4 + 3] * c4[3];
++        }
++        const float iw = h[3] != 0.f ? 1.f / h[3] : 1.f;
++        const float m[3] = {h[0] * iw, h[1] * iw, h[2] * iw};
++        NativeVtx v;
++        v.x = pnInv[0] * m[0] + pnInv[1] * m[1] + pnInv[2] * m[2] + pnInv[3];
++        v.y = pnInv[4] * m[0] + pnInv[5] * m[1] + pnInv[6] * m[2] + pnInv[7];
++        v.z = pnInv[8] * m[0] + pnInv[9] * m[1] + pnInv[10] * m[2] + pnInv[11];
++        v.c = s.c;
++        corner[q] = v;
++      }
++      // Aurora's quad: (0, 1, 3), (3, 2, 0)
++      static const int kOrder[6] = {0, 1, 3, 3, 2, 0};
++      for (int i = 0; i < 6; ++i) {
++        gOut.push_back(corner[kOrder[i]]);
++      }
++      if (bothWindings) {
++        for (int i = 5; i >= 0; --i) {
++          gOut.push_back(corner[kOrder[i]]);
++        }
++      }
++    }
++  }
++
++  // One material for all of it: the vertex colour (the per-primitive path's K colour, per vertex now).
++  const GXVtxDescList desc[3] = {
++      {GX_VA_POS, GX_DIRECT},
++      {GX_VA_CLR0, GX_DIRECT},
++      {GX_VA_NULL, GX_NONE},
++  };
++  CGX::SetVtxDescv(desc);
++  GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_POS, GX_POS_XYZ, GX_F32, 0);
++  GXSetVtxAttrFmt(GX_VTXFMT1, GX_VA_CLR0, GX_CLR_RGBA, GX_RGBA8, 0);
++  CGX::SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORD_NULL, GX_TEXMAP_NULL, GX_COLOR0A0);
++  CGX::SetTevColorIn(GX_TEVSTAGE0, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_RASC);
++  CGX::SetTevAlphaIn(GX_TEVSTAGE0, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_RASA);
++  const uint kChunk = 3 * 8190;
++  for (uint at = 0; at < gOut.size(); at += kChunk) {
++    const uint n = CMath::Min< uint >(kChunk, static_cast< uint >(gOut.size() - at));
++    CGX::Begin(GX_TRIANGLES, GX_VTXFMT1, n);
++    for (uint i = at; i < at + n; ++i) {
++      const NativeVtx& v = gOut[i];
++      GXPosition3f32(v.x, v.y, v.z);
++      GXColor4u8(v.c.r, v.c.g, v.c.b, v.c.a);
++    }
++    CGX::End();
++  }
++
++  // The state the per-primitive path leaves: its material, the last K colour and line width.
++  CMapAreaSurface::SetupGXMaterial();
++  CGX::SetTevKColor(GX_KCOLOR0, gLastK);
++  if (gLastSetWidth >= 0.f) {
++    CGraphics::SetLineWidth(gLastSetWidth, kTO_One);
++  }
++  static int reports = 0;
++  if (reports < 3) {
++    ++reports;
++    OSReport("map: native batch: %u fill vertices, %u outline segments, %u runs, %u vertices drawn\n",
++             static_cast< uint >(gFill.size()), static_cast< uint >(gSegs.size()),
++             static_cast< uint >(gRuns.size()), static_cast< uint >(gOut.size()));
++  }
++  gFill.clear();
++  gSegs.clear();
++  gRuns.clear();
++  gLastSetWidth = -1.f;
++}
++#endif
+diff --git a/src/MetroidPrime/CMapWorld.cpp b/src/MetroidPrime/CMapWorld.cpp
+index ba543385c..6f5169439 100644
+--- a/src/MetroidPrime/CMapWorld.cpp
++++ b/src/MetroidPrime/CMapWorld.cpp
+@@ -498,6 +498,9 @@ void CMapWorld::DrawAreas(
+       CMapArea::SetupLighting(cameraXf);
+     }
+     CMapArea::CMapAreaSurface::SetupGXMaterial();
++#ifdef TARGET_PC
++    const bool nativeMap = CMapArea::NativeMapEnabled();
++#endif
+     for (int i = 0; i < sortInfos.size(); ++i) {
+       const CMapObjectSortInfo& info = sortInfos[i];
+       CMapObjectSortInfo::EObjectCode type = info.GetObjectCode();
+@@ -520,6 +523,15 @@ void CMapWorld::DrawAreas(
+         shade = constant + shade;
+         const CColor normalColor(shade, shade, shade, 1.f);
+         const CColor color = CColor::Modulate(surfaceColor, normalColor);
++#ifdef TARGET_PC
++        // mp2-nx (the native map build): queued for one batched draw (CMapArea::FlushNativeBatch)
++        if (nativeMap) {
++          surface.DrawNative(modelXf * areaXf, area->GetVertices(), color, outlineColor, outlineWidth);
++          lastMode = kDM_Surface;
++          lastArea = areaIdx;
++          continue;
++        }
++#endif
+         bool needsVertices = lastArea != areaIdx || lastMode != kDM_Surface;
+         if (needsVertices) {
+           gpRender->SetModelMatrix(modelXf * areaXf);
+@@ -528,6 +540,11 @@ void CMapWorld::DrawAreas(
+         surface.Draw(vertices, color, outlineColor, outlineWidth);
+         lastMode = kDM_Surface;
+       } else if (type == CMapObjectSortInfo::kOC_Door || type == CMapObjectSortInfo::kOC_Object) {
++#ifdef TARGET_PC
++        if (nativeMap) {
++          CMapArea::FlushNativeBatch();  // (the surfaces queued so far go before this object)
++        }
++#endif
+         EDrawMode mode = type == CMapObjectSortInfo::kOC_Door ? kDM_Door : kDM_Object;
+         const CMappableObject& object = area->GetMappableObject(idx);
+         bool needsVertices = lastMode != mode;
+@@ -544,6 +561,11 @@ void CMapWorld::DrawAreas(
+         object.Draw(selArea, mwInfo, worldAlpha * parms.GetAlpha(), needsVertices);
+         lastMode = mode;
+       } else if (type == CMapObjectSortInfo::kOC_DoorSurface) {
++#ifdef TARGET_PC
++        if (nativeMap) {
++          CMapArea::FlushNativeBatch();
++        }
++#endif
+         const CMappableObject& object = area->GetMappableObject(idx / 6);
+         gpRender->SetModelMatrix(
+             modelXf * CTransform4f::Translate(area->GetAreaPostTranslate(parms.GetWorld())) *
+@@ -554,6 +576,11 @@ void CMapWorld::DrawAreas(
+       }
+       lastArea = areaIdx;
+     }
++#ifdef TARGET_PC
++    if (nativeMap) {
++      CMapArea::FlushNativeBatch();
++    }
++#endif
+   }
+   CGraphics::SetAmbientColor(CColor::White());
  }
 diff --git a/src/MetroidPrime/CWorldTransManager.cpp b/src/MetroidPrime/CWorldTransManager.cpp
 index de0044446..2a49a83db 100644

@@ -1168,6 +1168,45 @@ index efddaaf2a..f667bc960 100644
                                   },
                                   worker_main};
  }
+diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
+index ac6a3b6cb..0afc7d249 100644
+--- a/lib/gx/gx.cpp
++++ b/lib/gx/gx.cpp
+@@ -1034,3 +1034,34 @@ void shutdown() noexcept {
+   texture::shutdown();
+ }
+ } // namespace aurora::gx
++
++// mp2-nx (the native map build): the state a GX draw issued now would be transformed and rasterised with, for
++// a caller that expands GX lines itself (the map screen's batched surfaces, CMapArea.cpp): the FIFO is drained
++// first (as vfx::draw_triangles does), so the state is the one the next draw will see. pn: the current position
++// matrix's three rows; proj: the projection's four rows as GXSetProjection set them (shader_info.cpp changes only
++// the z row); vp: the render and logical viewport sizes; lineWidth: GXSetLineWidth's width in logical pixels.
++#include "fifo.hpp"
++extern "C" void aurora_gx_drawing_state(float pn[12], float proj[16], float vp[4], float* lineWidth, int* cullMode) {
++  using namespace aurora::gx;
++  fifo::drain();
++  const auto& pos = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
++  const aurora::Vec4<float>* rows3[3] = {&pos.m0, &pos.m1, &pos.m2};
++  for (int r = 0; r < 3; ++r) {
++    for (int c = 0; c < 4; ++c) {
++      pn[r * 4 + c] = rows3[r]->m[c];
++    }
++  }
++  const auto& p = g_gxState.proj;
++  const aurora::Vec4<float>* rows4[4] = {&p.m0, &p.m1, &p.m2, &p.m3};
++  for (int r = 0; r < 4; ++r) {
++    for (int c = 0; c < 4; ++c) {
++      proj[r * 4 + c] = rows4[r]->m[c];
++    }
++  }
++  vp[0] = g_gxState.renderViewport.width;
++  vp[1] = g_gxState.renderViewport.height;
++  vp[2] = g_gxState.logicalViewport.width;
++  vp[3] = g_gxState.logicalViewport.height;
++  *lineWidth = static_cast<float>(g_gxState.lineWidth) / 6.f;
++  *cullMode = static_cast<int>(g_gxState.cullMode);
++}
 diff --git a/lib/gx/shader.cpp b/lib/gx/shader.cpp
 index f9d2ad809..0437ed1bf 100644
 --- a/lib/gx/shader.cpp

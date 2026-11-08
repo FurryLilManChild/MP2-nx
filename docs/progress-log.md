@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-08: the native map build
+
+- The owner's Vulkan log on the zoomed-out map: 25.1 fps, 6,404 draws (1,144 merged), the game thread's end_frame 31 ms
+  (Aurora's GX FIFO drain), the render worker 40 ms (26 ms of it Dawn's queue submit). deko3d on the same kind of
+  view: 23.2 fps. So the map is slow on both renderers: GX emulation of static geometry, a draw per primitive.
+  The owner: the map at 60 fps is close to a requirement; go native.
+- The map screen (CMapWorld::DrawAreas, sorted by depth for the map screen) drew each CMapAreaSurface with
+  CGX::Begin per surface primitive and per outline line strip (thick outlines twice). Now (TARGET_PC,
+  MP2_NATIVE_MAP not 0): CMapAreaSurface::DrawNative queues the surface's triangles (strips, fans and quads
+  turned into triangles in Aurora's order and winding, gx/command_processor.cpp) in world space with their colour,
+  and its outline segments with colour and width; CMapArea::FlushNativeBatch draws the queue as GX_TRIANGLES
+  (POS F32 and CLR0 RGBA8 direct, VTXFMT1, TEV = the rasterised colour) in chunks of 24,570 vertices, before each
+  map object (doors and icons keep their GX path) and at the end. Outlines become Aurora's line quads (gx/shader.cpp
+  lineMode 1/2: screen-space width = GX width / 6 x min(render / logical viewport)), built in clip space from the
+  state aurora_gx_drawing_state reports after draining the FIFO (the view, the projection, the viewports, the line
+  width, the cull mode) and taken back to world space; both windings while culling is on (Aurora draws lines
+  unculled). Afterwards the surface material, the last K colour and line width are put back.
+- New Aurora export: aurora_gx_drawing_state (gx/gx.cpp).
+
+
 ## 2026-11-08: the map on both renderers ("frame:" lines)
 
 - The repeated-state build on the zoomed-out map (6,407 draws): 23.2 fps (43 ms; 19.5 fps and 51 ms before);
