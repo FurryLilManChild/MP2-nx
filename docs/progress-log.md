@@ -2,6 +2,17 @@
 
 Newest first.
 
+## 2026-11-08: the map on both renderers ("frame:" lines)
+
+- The repeated-state build on the zoomed-out map (6,407 draws): 23.2 fps (43 ms; 19.5 fps and 51 ms before);
+  recording 13.5 ms (24.1 before; 6,542 of 36,510 calls skipped, not the 60% expected: the pipeline, the bind
+  group's dynamic offsets, the index buffer range and the immediates change at almost every draw), replay 10.6 ms,
+  Aurora's own part about 16 ms.
+- The owner: the map is fine on Vulkan; asked for the same measure there before any more bridge work. This build: a
+  "frame:" line from Aurora's end_frame (aurora.cpp frame_report, both renderers): fps, draws and merged draws,
+  passes, the game thread's end_frame time and its waits for the worker, the worker's busy time and of it the
+  queue submit and the present.
+
 ## 2026-11-07: scan visor fixed; the map's cost found; the recorder skips repeated state; Vulkan boot screen
 
 - Scan visor: works (the owner). The log had 30 "Dawn handed back view #54 of 'Render texture' 1279x720, which the game

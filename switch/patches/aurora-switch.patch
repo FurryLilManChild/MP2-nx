@@ -13,10 +13,101 @@ index e640c6221..da641f71d 100644
    uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
    uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
 diff --git a/lib/aurora.cpp b/lib/aurora.cpp
-index b7f692cbf..eb3bb27e8 100644
+index b7f692cbf..5edfc83bc 100644
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
-@@ -609,6 +609,9 @@ void end_frame() noexcept {
+@@ -532,8 +532,90 @@ bool begin_frame() noexcept {
+   return true;
+ }
+ 
++// ---- mp2-nx (the Vulkan comparison build): the frame report of both renderers
++// Logged as "frame:" every 3 s window below 55 fps (and once every 30 s), from the render worker after each
++// present: the frame rate; the game thread's end_frame (GX FIFO drain and the frame's queueing); Aurora's draws,
++// merged draws and passes; the render worker's busy time and, of it, the queue submit and the present (on Vulkan
++// Dawn's backend does its work there; on deko3d the bridge replays at the submit); and the game thread's waits
++// for the worker. The deko3d bridge's own "cpu:" line splits its part further.
++extern "C" void aurora_render_worker_times(uint64_t* busyNs, uint64_t* gameWaitNs);  // gfx/render_worker.cpp
++#if defined(__SWITCH__)
++extern "C" __attribute__((weak)) bool mp2nx_dk_active(void);  // switch/deko/dk_surface.cpp (when linked)
++#endif
++namespace frame_report {
++std::string_view renderer_name() {
++#if defined(__SWITCH__)
++  if (mp2nx_dk_active != nullptr && mp2nx_dk_active()) {
++    return "deko3d";
++  }
++#endif
++  return magic_enum::enum_name(webgpu::g_backendType);
++}
++std::atomic<uint64_t> g_mainNs{0}, g_submitNs{0}, g_presentNs{0};
++uint64_t now_ns() {
++  return static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++void tick(uint32_t draws, uint32_t merged, uint32_t passes) {
++  struct Snap {
++    uint64_t t = 0, frames = 0, main = 0, submit = 0, present = 0, busy = 0, wait = 0, draws = 0, merged = 0,
++             passes = 0;
++  };
++  static Snap last, acc;
++  static uint64_t lastLogged = 0;
++  static uint32_t lines = 0;
++  acc.frames++;
++  acc.draws += draws;
++  acc.merged += merged;
++  acc.passes += passes;
++  const uint64_t now = now_ns();
++  if (last.t == 0) {
++    last.t = now;
++    last.frames = acc.frames;
++    last.draws = acc.draws;
++    last.merged = acc.merged;
++    last.passes = acc.passes;
++    last.main = g_mainNs.load();
++    last.submit = g_submitNs.load();
++    last.present = g_presentNs.load();
++    aurora_render_worker_times(&last.busy, &last.wait);
++    return;
++  }
++  if (now - last.t < 3'000'000'000ull) {
++    return;
++  }
++  Snap cur = acc;
++  cur.t = now;
++  cur.main = g_mainNs.load();
++  cur.submit = g_submitNs.load();
++  cur.present = g_presentNs.load();
++  aurora_render_worker_times(&cur.busy, &cur.wait);
++  const double n = double(cur.frames - last.frames);
++  const double fps = n * 1e9 / double(now - last.t);
++  if ((fps < 55.0 || now - lastLogged >= 30'000'000'000ull) && lines < 400 && n > 0) {
++    lines++;
++    lastLogged = now;
++    auto ms = [&](uint64_t a, uint64_t b) { return double(a - b) / 1e6 / n; };
++    Log.info("frame: {} {:.1f} fps ({:.2f} ms a frame); {:.0f} draws ({:.0f} merged into others), {:.0f} passes; game "
++             "thread end_frame {:.2f} ms, waits for the worker {:.2f} ms; render worker busy {:.2f} ms, of it queue "
++             "submit {:.2f} ms, present {:.2f} ms (per frame)",
++             renderer_name(),
++             fps, double(now - last.t) / 1e6 / n, double(cur.draws - last.draws) / n,
++             double(cur.merged - last.merged) / n, double(cur.passes - last.passes) / n, ms(cur.main, last.main),
++             ms(cur.wait, last.wait), ms(cur.busy, last.busy), ms(cur.submit, last.submit),
++             ms(cur.present, last.present));
++  }
++  last = cur;
++}
++} // namespace frame_report
++
+ void end_frame() noexcept {
+   ZoneScoped;
++  const uint64_t frameReportStart = frame_report::now_ns();
++  struct FrameReportMain {
++    uint64_t t0;
++    ~FrameReportMain() { frame_report::g_mainNs.fetch_add(frame_report::now_ns() - t0, std::memory_order_relaxed); }
++  } frameReportMain{frameReportStart};
+   // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
+   struct ResizeFrameTimer {
+     std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+@@ -609,6 +691,9 @@ void end_frame() noexcept {
      }
      {
        window::SurfaceLock surfaceLock;
@@ -26,7 +117,35 @@ index b7f692cbf..eb3bb27e8 100644
        if (!skipPresent && window::is_presentable() && g_surface) {
          ZoneScopedN("Acquire texture");
          phase::set(phase::Render, "surface GetCurrentTexture");
-@@ -827,7 +830,15 @@ void aurora_shutdown() { aurora::shutdown(); }
+@@ -676,7 +761,9 @@ void end_frame() noexcept {
+     {
+       ZoneScopedN("Queue Submit");
+       phase::set(phase::Render, "queue submit");
++      const uint64_t submitStart = frame_report::now_ns();
+       g_queue.Submit(1, &buffer);
++      frame_report::g_submitNs.fetch_add(frame_report::now_ns() - submitStart, std::memory_order_relaxed);
+     }
+     gfx::sample_dawn_memory();
+     phase::set(phase::Render, "after submit");
+@@ -688,7 +775,9 @@ void end_frame() noexcept {
+         window::SurfaceLock surfaceLock;
+         if (window::is_presentable()) {
+           phase::set(phase::Render, "surface Present");
++          const uint64_t presentStart = frame_report::now_ns();
+           status = g_surface.Present();
++          frame_report::g_presentNs.fetch_add(frame_report::now_ns() - presentStart, std::memory_order_relaxed);
+         }
+       }
+       phase::set(phase::Render, "after present");
+@@ -753,6 +842,7 @@ void end_frame() noexcept {
+     TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(stats.lastIndexSize));
+     TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
+     TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
++    frame_report::tick(stats.drawCallCount, stats.mergedDrawCallCount, stats.renderPassCount);
+   });
+ 
+ #endif
+@@ -827,7 +917,15 @@ void aurora_shutdown() { aurora::shutdown(); }
  const AuroraEvent* aurora_update() { return aurora::update(); }
  bool aurora_begin_frame() { return aurora::begin_frame(); }
  void aurora_release_lost_surface() { aurora::release_lost_surface(); }
