@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-08: the native map is slower; diagnostics build
+
+- Native map log (deko3d, heavy view): 18.8 fps, 53 ms a frame, 800 draws (6,400 before); "map: native batch:
+  2163 fill vertices, 1746 outline segments, 246 runs, 23115 vertices drawn"; the game thread's end_frame 6 ms
+  (31 before), the render worker 6.9 ms (40 before), acquire 0.18 ms (no GPU wait). So 47 ms is spent outside
+  everything measured: the game thread before end_frame (the map code, or its wait in aurora_gx_drawing_state's
+  fifo::drain for the FIFO processor thread, kProcessingMode Thread) or something not yet seen.
+- This build measures it: "map: per frame" (game side: the sorted map draw, queueing, flushes with the state
+  query and its drain, line expansion, GX writes, vertices; also logged on the GX path, MP2_NATIVE_MAP=0) and a
+  second "frame:" line (the game thread outside end_frame, the FIFO processor's busy time, the game thread's drain
+  waits and count, FIFO buffer growth).
+
+
 ## 2026-11-08: the native map build
 
 - The owner's Vulkan log on the zoomed-out map: 25.1 fps, 6,404 draws (1,144 merged), the game thread's end_frame 31 ms

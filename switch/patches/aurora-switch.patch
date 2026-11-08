@@ -13,10 +13,10 @@ index e640c6221..da641f71d 100644
    uint64_t skippedDraws; // draws dropped because their pipeline was not built yet
    uint64_t newMisses;    // draw lookups of a pipeline the cache had never recorded
 diff --git a/lib/aurora.cpp b/lib/aurora.cpp
-index b7f692cbf..5edfc83bc 100644
+index b7f692cbf..3d0c6d8a6 100644
 --- a/lib/aurora.cpp
 +++ b/lib/aurora.cpp
-@@ -532,8 +532,90 @@ bool begin_frame() noexcept {
+@@ -532,8 +532,109 @@ bool begin_frame() noexcept {
    return true;
  }
  
@@ -27,6 +27,8 @@ index b7f692cbf..5edfc83bc 100644
 +// Dawn's backend does its work there; on deko3d the bridge replays at the submit); and the game thread's waits
 +// for the worker. The deko3d bridge's own "cpu:" line splits its part further.
 +extern "C" void aurora_render_worker_times(uint64_t* busyNs, uint64_t* gameWaitNs);  // gfx/render_worker.cpp
++extern "C" void aurora_fifo_times(uint64_t* workerNs, uint64_t* drainWaitNs, uint64_t* drains, uint64_t* growNs,
++                                  uint64_t* grows);  // gx/fifo.cpp (mp2-nx)
 +#if defined(__SWITCH__)
 +extern "C" __attribute__((weak)) bool mp2nx_dk_active(void);  // switch/deko/dk_surface.cpp (when linked)
 +#endif
@@ -40,6 +42,8 @@ index b7f692cbf..5edfc83bc 100644
 +  return magic_enum::enum_name(webgpu::g_backendType);
 +}
 +std::atomic<uint64_t> g_mainNs{0}, g_submitNs{0}, g_presentNs{0};
++std::atomic<uint64_t> g_gameOtherNs{0};  // the game thread between end_frame calls (the game's own frame)
++uint64_t g_lastEndFrameEnd = 0;
 +uint64_t now_ns() {
 +  return static_cast<uint64_t>(
 +      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
@@ -47,7 +51,7 @@ index b7f692cbf..5edfc83bc 100644
 +void tick(uint32_t draws, uint32_t merged, uint32_t passes) {
 +  struct Snap {
 +    uint64_t t = 0, frames = 0, main = 0, submit = 0, present = 0, busy = 0, wait = 0, draws = 0, merged = 0,
-+             passes = 0;
++             passes = 0, other = 0, fifoWorker = 0, drainWait = 0, drains = 0, growNs = 0, grows = 0;
 +  };
 +  static Snap last, acc;
 +  static uint64_t lastLogged = 0;
@@ -66,7 +70,9 @@ index b7f692cbf..5edfc83bc 100644
 +    last.main = g_mainNs.load();
 +    last.submit = g_submitNs.load();
 +    last.present = g_presentNs.load();
++    last.other = g_gameOtherNs.load();
 +    aurora_render_worker_times(&last.busy, &last.wait);
++    aurora_fifo_times(&last.fifoWorker, &last.drainWait, &last.drains, &last.growNs, &last.grows);
 +    return;
 +  }
 +  if (now - last.t < 3'000'000'000ull) {
@@ -77,7 +83,9 @@ index b7f692cbf..5edfc83bc 100644
 +  cur.main = g_mainNs.load();
 +  cur.submit = g_submitNs.load();
 +  cur.present = g_presentNs.load();
++  cur.other = g_gameOtherNs.load();
 +  aurora_render_worker_times(&cur.busy, &cur.wait);
++  aurora_fifo_times(&cur.fifoWorker, &cur.drainWait, &cur.drains, &cur.growNs, &cur.grows);
 +  const double n = double(cur.frames - last.frames);
 +  const double fps = n * 1e9 / double(now - last.t);
 +  if ((fps < 55.0 || now - lastLogged >= 30'000'000'000ull) && lines < 400 && n > 0) {
@@ -92,6 +100,10 @@ index b7f692cbf..5edfc83bc 100644
 +             double(cur.merged - last.merged) / n, double(cur.passes - last.passes) / n, ms(cur.main, last.main),
 +             ms(cur.wait, last.wait), ms(cur.busy, last.busy), ms(cur.submit, last.submit),
 +             ms(cur.present, last.present));
++    Log.info("frame: game thread outside end_frame {:.2f} ms; GX FIFO processor busy {:.2f} ms, the game thread waited "
++             "for it {:.2f} ms in {:.1f} drains; FIFO buffer grown {:.1f} times, {:.2f} ms (per frame)",
++             ms(cur.other, last.other), ms(cur.fifoWorker, last.fifoWorker), ms(cur.drainWait, last.drainWait),
++             double(cur.drains - last.drains) / n, double(cur.grows - last.grows) / n, ms(cur.growNs, last.growNs));
 +  }
 +  last = cur;
 +}
@@ -100,14 +112,21 @@ index b7f692cbf..5edfc83bc 100644
  void end_frame() noexcept {
    ZoneScoped;
 +  const uint64_t frameReportStart = frame_report::now_ns();
++  if (frame_report::g_lastEndFrameEnd != 0) {
++    frame_report::g_gameOtherNs.fetch_add(frameReportStart - frame_report::g_lastEndFrameEnd, std::memory_order_relaxed);
++  }
 +  struct FrameReportMain {
 +    uint64_t t0;
-+    ~FrameReportMain() { frame_report::g_mainNs.fetch_add(frame_report::now_ns() - t0, std::memory_order_relaxed); }
++    ~FrameReportMain() {
++      const uint64_t end = frame_report::now_ns();
++      frame_report::g_mainNs.fetch_add(end - t0, std::memory_order_relaxed);
++      frame_report::g_lastEndFrameEnd = end;
++    }
 +  } frameReportMain{frameReportStart};
    // The frames just after an EFB resize, timed for its log line (webgpu::resize_swapchain).
    struct ResizeFrameTimer {
      std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-@@ -609,6 +691,9 @@ void end_frame() noexcept {
+@@ -609,6 +710,9 @@ void end_frame() noexcept {
      }
      {
        window::SurfaceLock surfaceLock;
@@ -117,7 +136,7 @@ index b7f692cbf..5edfc83bc 100644
        if (!skipPresent && window::is_presentable() && g_surface) {
          ZoneScopedN("Acquire texture");
          phase::set(phase::Render, "surface GetCurrentTexture");
-@@ -676,7 +761,9 @@ void end_frame() noexcept {
+@@ -676,7 +780,9 @@ void end_frame() noexcept {
      {
        ZoneScopedN("Queue Submit");
        phase::set(phase::Render, "queue submit");
@@ -127,7 +146,7 @@ index b7f692cbf..5edfc83bc 100644
      }
      gfx::sample_dawn_memory();
      phase::set(phase::Render, "after submit");
-@@ -688,7 +775,9 @@ void end_frame() noexcept {
+@@ -688,7 +794,9 @@ void end_frame() noexcept {
          window::SurfaceLock surfaceLock;
          if (window::is_presentable()) {
            phase::set(phase::Render, "surface Present");
@@ -137,7 +156,7 @@ index b7f692cbf..5edfc83bc 100644
          }
        }
        phase::set(phase::Render, "after present");
-@@ -753,6 +842,7 @@ void end_frame() noexcept {
+@@ -753,6 +861,7 @@ void end_frame() noexcept {
      TracyPlot("aurora: lastIndexSize", static_cast<int64_t>(stats.lastIndexSize));
      TracyPlot("aurora: lastStorageSize", static_cast<int64_t>(stats.lastStorageSize));
      TracyPlot("aurora: lastTextureUploadSize", static_cast<int64_t>(stats.lastTextureUploadSize));
@@ -145,7 +164,7 @@ index b7f692cbf..5edfc83bc 100644
    });
  
  #endif
-@@ -827,7 +917,15 @@ void aurora_shutdown() { aurora::shutdown(); }
+@@ -827,7 +936,15 @@ void aurora_shutdown() { aurora::shutdown(); }
  const AuroraEvent* aurora_update() { return aurora::update(); }
  bool aurora_begin_frame() { return aurora::begin_frame(); }
  void aurora_release_lost_surface() { aurora::release_lost_surface(); }
@@ -1153,10 +1172,43 @@ index d918ce109..f4f634b88 100644
  constexpr uint32_t kDefaultReplacementMaxDim = 0;
  constexpr uint64_t kDefaultReplacementCacheMB = 4096;
 diff --git a/lib/gx/fifo.cpp b/lib/gx/fifo.cpp
-index efddaaf2a..f667bc960 100644
+index efddaaf2a..54d320c46 100644
 --- a/lib/gx/fifo.cpp
 +++ b/lib/gx/fifo.cpp
-@@ -195,7 +195,11 @@ void start_worker() {
+@@ -5,6 +5,7 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#include <chrono>
+ #include <cstring>
+ #include <limits>
+ #include <mutex>
+@@ -138,6 +139,14 @@ void dispatch_draw_done() noexcept {
+   }
+ }
+ 
++// mp2-nx (the map diagnostics build): the FIFO processor's busy time, the producer's waits for it in drain()
++// and the buffer's growth, read by Aurora's frame report (aurora.cpp, aurora_fifo_times)
++std::atomic<uint64_t> sStatWorkerNs{0}, sStatDrainWaitNs{0}, sStatDrains{0}, sStatGrowNs{0}, sStatGrows{0};
++uint64_t stat_now_ns() {
++  return static_cast<uint64_t>(
++      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
++}
++
+ void wake_worker() noexcept {
+   sWorkerWake.fetch_add(1, std::memory_order_release);
+   sWorkerWake.notify_all();
+@@ -178,7 +187,9 @@ void worker_main(std::stop_token token) noexcept {
+     const uint64_t processed = sProcessed.load(std::memory_order_relaxed);
+     const uint64_t published = sPublished.load(std::memory_order_acquire);
+     if (published != processed) {
++      const uint64_t t0 = stat_now_ns();
+       process_to(published, std::memory_order_release);
++      sStatWorkerNs.fetch_add(stat_now_ns() - t0, std::memory_order_relaxed);
+       continue;
+     }
+ 
+@@ -195,7 +206,11 @@ void start_worker() {
    }
    sWorkerThread = thread::Thread{{
                                       .name = "Aurora FIFO processor",
@@ -1168,6 +1220,50 @@ index efddaaf2a..f667bc960 100644
                                   },
                                   worker_main};
  }
+@@ -320,8 +335,11 @@ void write_data_grow(const void* data, uint32_t length) {
+     detail::sBufferData = resized;
+   };
+   if (sWorkerThread.joinable()) {
++    const uint64_t t0 = stat_now_ns();
+     std::lock_guard lock{sBufferMutex};
+     grow();
++    sStatGrowNs.fetch_add(stat_now_ns() - t0, std::memory_order_relaxed);
++    sStatGrows.fetch_add(1, std::memory_order_relaxed);
+   } else {
+     grow();
+   }
+@@ -410,6 +428,7 @@ void drain() {
+     sPublished.store(target, std::memory_order_release);
+     wake_worker();
+ 
++    const uint64_t waitStart = stat_now_ns();
+     uint64_t processed = sProcessed.load(std::memory_order_acquire);
+     if (processed < target) {
+       do {
+@@ -417,6 +436,8 @@ void drain() {
+         processed = sProcessed.load(std::memory_order_acquire);
+       } while (processed < target);
+     }
++    sStatDrainWaitNs.fetch_add(stat_now_ns() - waitStart, std::memory_order_relaxed);
++    sStatDrains.fetch_add(1, std::memory_order_relaxed);
+     break;
+   }
+   }
+@@ -443,3 +464,14 @@ void clear_buffer() {
+ }
+ 
+ } // namespace aurora::gx::fifo
++
++// mp2-nx (the map diagnostics build): cumulative, read by aurora.cpp's frame report
++extern "C" void aurora_fifo_times(uint64_t* workerNs, uint64_t* drainWaitNs, uint64_t* drains, uint64_t* growNs,
++                                  uint64_t* grows) {
++  using namespace aurora::gx::fifo;
++  *workerNs = sStatWorkerNs.load(std::memory_order_relaxed);
++  *drainWaitNs = sStatDrainWaitNs.load(std::memory_order_relaxed);
++  *drains = sStatDrains.load(std::memory_order_relaxed);
++  *growNs = sStatGrowNs.load(std::memory_order_relaxed);
++  *grows = sStatGrows.load(std::memory_order_relaxed);
++}
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
 index ac6a3b6cb..0afc7d249 100644
 --- a/lib/gx/gx.cpp

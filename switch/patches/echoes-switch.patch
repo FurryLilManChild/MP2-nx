@@ -80,7 +80,7 @@ index ef1c8c60d..53b70f3c6 100644
 +    endif()
 +endif()
 diff --git a/include/MetroidPrime/CMapArea.hpp b/include/MetroidPrime/CMapArea.hpp
-index 97ff568bc..ae6075e0b 100644
+index 97ff568bc..8b22342b2 100644
 --- a/include/MetroidPrime/CMapArea.hpp
 +++ b/include/MetroidPrime/CMapArea.hpp
 @@ -24,6 +24,13 @@ public:
@@ -97,7 +97,7 @@ index 97ff568bc..ae6075e0b 100644
      CVector3f GetNormal() const { return mNormal; }
      CVector3f GetCenterPosition() const { return mCentroid; }
  
-@@ -56,6 +63,13 @@ public:
+@@ -56,6 +63,16 @@ public:
    const CVector3f& GetAreaPostTranslate(const IWorld& world);
    // Guessed names for the prepared surface/outline/door rendering path.
    static void SetupLighting(const CTransform4f& cameraXf);
@@ -107,6 +107,9 @@ index 97ff568bc..ae6075e0b 100644
 +  // queued: nothing done. NativeMapEnabled: MP2_NATIVE_MAP=0 (deko3d_env.txt) keeps the GX path.
 +  static void FlushNativeBatch();
 +  static bool NativeMapEnabled();
++  // mp2-nx (the map diagnostics build): the map screen's sorted draw took drawNs; logs every 3 s what the native
++  // path's steps cost per frame (queueing, the state query with its FIFO drain, the line expansion, the GX writes)
++  static void NativeFrameDone(unsigned long long drawNs);
 +#endif
    void Draw(const CColor& surfaceColor, const CColor& outlineColor, const CTransform4f& areaXf,
              const CTransform4f& modelXf, int selArea, const CMapWorldInfo& info, float alpha) const;
@@ -499,7 +502,7 @@ index 468523c04..29ccf33a4 100644
    gResFactoryUnknown = 2;
  }
 diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
-index 3d4fe910a..9ac4967bc 100644
+index 3d4fe910a..7b2de34a0 100644
 --- a/src/MetroidPrime/CMapArea.cpp
 +++ b/src/MetroidPrime/CMapArea.cpp
 @@ -15,6 +15,7 @@
@@ -510,7 +513,7 @@ index 3d4fe910a..9ac4967bc 100644
  #include "Kyoto/Streams/CInputStream.hpp"
  #include "Kyoto/Streams/CMemoryStreamOut.hpp"
  
-@@ -542,3 +543,333 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
+@@ -542,3 +543,379 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
  #endif
    return rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
  }
@@ -525,6 +528,7 @@ index 3d4fe910a..9ac4967bc 100644
 +// GX_TRIANGLES in a handful of draws, in the same order, so the blending is the same. Outlines are GX lines,
 +// which Aurora draws as screen-space quads (gx/shader.cpp, lineMode 1/2): the same quads are built here from the
 +// state Aurora reports (aurora_gx_drawing_state) and taken back to world space, so they land on the same pixels.
++#include <chrono>
 +#include <cstdlib>
 +#include <vector>
 +
@@ -551,6 +555,17 @@ index 3d4fe910a..9ac4967bc 100644
 +std::vector< NativeRun > gRuns;
 +std::vector< NativeVtx > gOut;
 +GXColor gLastK = {0, 0, 0, 0};
++// the per-frame costs (the map diagnostics build)
++struct NativeStats {
++  unsigned long long frames, draw, queue, state, expand, write, flushes, verts;
++};
++NativeStats gStats = {0, 0, 0, 0, 0, 0, 0, 0};
++unsigned long long gStatsWindow = 0;
++inline unsigned long long native_now() {
++  return static_cast< unsigned long long >(std::chrono::duration_cast< std::chrono::nanoseconds >(
++                                               std::chrono::steady_clock::now().time_since_epoch())
++                                               .count());
++}
 +float gLastSetWidth = -1.f;  // the last width the thick outline path set (CGraphics::SetLineWidth)
 +
 +void add_run(bool lines, uint count) {
@@ -627,6 +642,11 @@ index 3d4fe910a..9ac4967bc 100644
 +void CMapArea::CMapAreaSurface::DrawNative(const CTransform4f& xf, const CVector3f* verts,
 +                                           const CColor& surfColor, const CColor& lineColor,
 +                                           float lineWidth) const {
++  const unsigned long long queueStart = native_now();
++  struct QueueTimer {
++    unsigned long long t0;
++    ~QueueTimer() { gStats.queue += native_now() - t0; }
++  } queueTimer = {queueStart};
 +  const bool hasSurfAlpha = surfColor.GetAlpha() > 0.0f;
 +  const bool hasLineAlpha = lineColor.GetAlpha() > 0.0f;
 +  const int numSurfaces = *mSurfOffset;
@@ -718,10 +738,14 @@ index 3d4fe910a..9ac4967bc 100644
 +    return;
 +  }
 +  // The batch is in world space: the model matrix is the identity, so the position matrix is the view.
++  const unsigned long long flushStart = native_now();
 +  CGraphics::SetIdentityModelMatrix();
 +  float pn[12], proj[16], vp[4], gxWidth = 1.f;
 +  int cull = GX_CULL_NONE;
 +  aurora_gx_drawing_state(pn, proj, vp, &gxWidth, &cull);
++  const unsigned long long stateDone = native_now();
++  gStats.state += stateDone - flushStart;
++  gStats.flushes++;
 +  // proj and the position matrix (as a 4x4) inverted: a line quad's corners, built in clip space, go back to
 +  // world space, so the GPU's own transform puts them where Aurora's line shader would.
 +  float pn4[16] = {pn[0], pn[1], pn[2], pn[3], pn[4], pn[5], pn[6], pn[7], pn[8], pn[9], pn[10], pn[11], 0.f, 0.f, 0.f, 1.f};
@@ -801,6 +825,9 @@ index 3d4fe910a..9ac4967bc 100644
 +    }
 +  }
 +
++  const unsigned long long expandDone = native_now();
++  gStats.expand += expandDone - stateDone;
++  gStats.verts += gOut.size();
 +  // One material for all of it: the vertex colour (the per-primitive path's K colour, per vertex now).
 +  const GXVtxDescList desc[3] = {
 +      {GX_VA_POS, GX_DIRECT},
@@ -825,6 +852,7 @@ index 3d4fe910a..9ac4967bc 100644
 +    CGX::End();
 +  }
 +
++  gStats.write += native_now() - expandDone;
 +  // The state the per-primitive path leaves: its material, the last K colour and line width.
 +  CMapAreaSurface::SetupGXMaterial();
 +  CGX::SetTevKColor(GX_KCOLOR0, gLastK);
@@ -844,21 +872,51 @@ index 3d4fe910a..9ac4967bc 100644
 +  gLastSetWidth = -1.f;
 +}
 +#endif
++
++#ifdef TARGET_PC
++void CMapArea::NativeFrameDone(unsigned long long drawNs) {
++  gStats.frames++;
++  gStats.draw += drawNs;
++  const unsigned long long now = native_now();
++  if (gStatsWindow == 0) {
++    gStatsWindow = now;
++  }
++  if (now - gStatsWindow < 3000000000ull || gStats.frames == 0) {
++    return;
++  }
++  const double n = double(gStats.frames);
++  OSReport("map: per frame (%llu frames): the sorted map draw %.2f ms; of it queueing %.2f ms, %.1f flushes taking "
++           "the GX state %.2f ms (with a FIFO drain), the line expansion %.2f ms, the GX writes %.2f ms (%.0f vertices)\n",
++           gStats.frames, gStats.draw / n / 1e6, gStats.queue / n / 1e6, gStats.flushes / n, gStats.state / n / 1e6,
++           gStats.expand / n / 1e6, gStats.write / n / 1e6, gStats.verts / n);
++  gStats = NativeStats();
++  gStatsWindow = now;
++}
++#endif
 diff --git a/src/MetroidPrime/CMapWorld.cpp b/src/MetroidPrime/CMapWorld.cpp
-index ba543385c..6f5169439 100644
+index ba543385c..b86a4ce3d 100644
 --- a/src/MetroidPrime/CMapWorld.cpp
 +++ b/src/MetroidPrime/CMapWorld.cpp
-@@ -498,6 +498,9 @@ void CMapWorld::DrawAreas(
+@@ -1,4 +1,7 @@
+ #include "MetroidPrime/CMapWorld.hpp"
++#ifdef TARGET_PC
++#include <chrono>
++#endif
+ 
+ #include "Kyoto/CFactoryMgr.hpp"
+ #include "Kyoto/Graphics/CGraphics.hpp"
+@@ -498,6 +501,10 @@ void CMapWorld::DrawAreas(
        CMapArea::SetupLighting(cameraXf);
      }
      CMapArea::CMapAreaSurface::SetupGXMaterial();
 +#ifdef TARGET_PC
 +    const bool nativeMap = CMapArea::NativeMapEnabled();
++    const auto mapDrawStart = std::chrono::steady_clock::now();
 +#endif
      for (int i = 0; i < sortInfos.size(); ++i) {
        const CMapObjectSortInfo& info = sortInfos[i];
        CMapObjectSortInfo::EObjectCode type = info.GetObjectCode();
-@@ -520,6 +523,15 @@ void CMapWorld::DrawAreas(
+@@ -520,6 +527,15 @@ void CMapWorld::DrawAreas(
          shade = constant + shade;
          const CColor normalColor(shade, shade, shade, 1.f);
          const CColor color = CColor::Modulate(surfaceColor, normalColor);
@@ -874,7 +932,7 @@ index ba543385c..6f5169439 100644
          bool needsVertices = lastArea != areaIdx || lastMode != kDM_Surface;
          if (needsVertices) {
            gpRender->SetModelMatrix(modelXf * areaXf);
-@@ -528,6 +540,11 @@ void CMapWorld::DrawAreas(
+@@ -528,6 +544,11 @@ void CMapWorld::DrawAreas(
          surface.Draw(vertices, color, outlineColor, outlineWidth);
          lastMode = kDM_Surface;
        } else if (type == CMapObjectSortInfo::kOC_Door || type == CMapObjectSortInfo::kOC_Object) {
@@ -886,7 +944,7 @@ index ba543385c..6f5169439 100644
          EDrawMode mode = type == CMapObjectSortInfo::kOC_Door ? kDM_Door : kDM_Object;
          const CMappableObject& object = area->GetMappableObject(idx);
          bool needsVertices = lastMode != mode;
-@@ -544,6 +561,11 @@ void CMapWorld::DrawAreas(
+@@ -544,6 +565,11 @@ void CMapWorld::DrawAreas(
          object.Draw(selArea, mwInfo, worldAlpha * parms.GetAlpha(), needsVertices);
          lastMode = mode;
        } else if (type == CMapObjectSortInfo::kOC_DoorSurface) {
@@ -898,7 +956,7 @@ index ba543385c..6f5169439 100644
          const CMappableObject& object = area->GetMappableObject(idx / 6);
          gpRender->SetModelMatrix(
              modelXf * CTransform4f::Translate(area->GetAreaPostTranslate(parms.GetWorld())) *
-@@ -554,6 +576,11 @@ void CMapWorld::DrawAreas(
+@@ -554,6 +580,15 @@ void CMapWorld::DrawAreas(
        }
        lastArea = areaIdx;
      }
@@ -906,6 +964,10 @@ index ba543385c..6f5169439 100644
 +    if (nativeMap) {
 +      CMapArea::FlushNativeBatch();
 +    }
++    // (both paths: MP2_NATIVE_MAP=0 gives the GX path's time for comparison)
++    CMapArea::NativeFrameDone(static_cast< unsigned long long >(
++        std::chrono::duration_cast< std::chrono::nanoseconds >(std::chrono::steady_clock::now() - mapDrawStart)
++            .count()));
 +#endif
    }
    CGraphics::SetAmbientColor(CColor::White());
