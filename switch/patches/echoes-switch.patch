@@ -502,7 +502,7 @@ index 468523c04..29ccf33a4 100644
    gResFactoryUnknown = 2;
  }
 diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
-index 3d4fe910a..7b2de34a0 100644
+index 3d4fe910a..05ffe091c 100644
 --- a/src/MetroidPrime/CMapArea.cpp
 +++ b/src/MetroidPrime/CMapArea.cpp
 @@ -15,6 +15,7 @@
@@ -513,7 +513,7 @@ index 3d4fe910a..7b2de34a0 100644
  #include "Kyoto/Streams/CInputStream.hpp"
  #include "Kyoto/Streams/CMemoryStreamOut.hpp"
  
-@@ -542,3 +543,379 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
+@@ -542,3 +543,413 @@ CFactoryFnReturn FMapAreaFactory(const SObjectTag& objTag, CInputStream& in,
  #endif
    return rs_new CMapArea(in, gpResourceFactory->ResourceSize(objTag));
  }
@@ -529,6 +529,7 @@ index 3d4fe910a..7b2de34a0 100644
 +// which Aurora draws as screen-space quads (gx/shader.cpp, lineMode 1/2): the same quads are built here from the
 +// state Aurora reports (aurora_gx_drawing_state) and taken back to world space, so they land on the same pixels.
 +#include <chrono>
++#include <cstdio>
 +#include <cstdlib>
 +#include <vector>
 +
@@ -629,14 +630,40 @@ index 3d4fe910a..7b2de34a0 100644
 +}
 +}  // namespace
 +
++// The map diagnostics build: with the map open, the two paths take turns every 6 s (an A/B in one sitting,
++// nothing to change between runs); each switch is logged on stderr, next to Aurora's "frame:" lines.
++// MP2_NATIVE_MAP=0 or 1 (deko3d_env.txt) pins one path instead.
++namespace {
++int gPinned = -2;            // -2 unread, -1 alternate, 0 GX, 1 native
++bool gAbNative = true;
++unsigned long long gAbSince = 0;
++unsigned long long gAbLastSeen = 0;
++}  // namespace
++
 +bool CMapArea::NativeMapEnabled() {
-+  static const bool on = [] {
++  if (gPinned == -2) {
 +    const char* e = std::getenv("MP2_NATIVE_MAP");
-+    const bool enabled = e == nullptr || *e != '0';
-+    OSReport("map: native map surfaces %s (MP2_NATIVE_MAP)\n", enabled ? "on" : "off");
-+    return enabled;
-+  }();
-+  return on;
++    gPinned = e == nullptr || *e == '\0' ? -1 : (*e == '0' ? 0 : 1);
++    std::fprintf(stderr, "map: %s\n",
++                 gPinned < 0 ? "the native and GX map paths alternate every 6 s while the map is open"
++                             : (gPinned ? "the native map path (MP2_NATIVE_MAP=1)" : "the GX map path (MP2_NATIVE_MAP=0)"));
++  }
++  if (gPinned >= 0) {
++    return gPinned == 1;
++  }
++  const unsigned long long now = native_now();
++  // a map closed for more than a second opens on the native path again, with a new turn
++  if (gAbSince == 0 || now - gAbLastSeen > 1000000000ull) {
++    gAbNative = true;
++    gAbSince = now;
++    std::fprintf(stderr, "map: A/B: the map opened, NATIVE path\n");
++  } else if (now - gAbSince >= 6000000000ull) {
++    gAbNative = !gAbNative;
++    gAbSince = now;
++    std::fprintf(stderr, "map: A/B: now the %s path\n", gAbNative ? "NATIVE" : "GX (old)");
++  }
++  gAbLastSeen = now;
++  return gAbNative;
 +}
 +
 +void CMapArea::CMapAreaSurface::DrawNative(const CTransform4f& xf, const CVector3f* verts,
@@ -862,7 +889,7 @@ index 3d4fe910a..7b2de34a0 100644
 +  static int reports = 0;
 +  if (reports < 3) {
 +    ++reports;
-+    OSReport("map: native batch: %u fill vertices, %u outline segments, %u runs, %u vertices drawn\n",
++    std::fprintf(stderr, "map: native batch: %u fill vertices, %u outline segments, %u runs, %u vertices drawn\n",
 +             static_cast< uint >(gFill.size()), static_cast< uint >(gSegs.size()),
 +             static_cast< uint >(gRuns.size()), static_cast< uint >(gOut.size()));
 +  }
@@ -875,6 +902,13 @@ index 3d4fe910a..7b2de34a0 100644
 +
 +#ifdef TARGET_PC
 +void CMapArea::NativeFrameDone(unsigned long long drawNs) {
++  static bool lastNative = true;
++  const bool native = gPinned >= 0 ? gPinned == 1 : gAbNative;
++  if (native != lastNative) {
++    gStats = NativeStats();  // (a window holds one path only)
++    gStatsWindow = 0;
++    lastNative = native;
++  }
 +  gStats.frames++;
 +  gStats.draw += drawNs;
 +  const unsigned long long now = native_now();
@@ -885,9 +919,9 @@ index 3d4fe910a..7b2de34a0 100644
 +    return;
 +  }
 +  const double n = double(gStats.frames);
-+  OSReport("map: per frame (%llu frames): the sorted map draw %.2f ms; of it queueing %.2f ms, %.1f flushes taking "
++  std::fprintf(stderr, "map: %s path, per frame (%llu frames): the sorted map draw %.2f ms; of it queueing %.2f ms, %.1f flushes taking "
 +           "the GX state %.2f ms (with a FIFO drain), the line expansion %.2f ms, the GX writes %.2f ms (%.0f vertices)\n",
-+           gStats.frames, gStats.draw / n / 1e6, gStats.queue / n / 1e6, gStats.flushes / n, gStats.state / n / 1e6,
++           native ? "NATIVE" : "GX (old)", gStats.frames, gStats.draw / n / 1e6, gStats.queue / n / 1e6, gStats.flushes / n, gStats.state / n / 1e6,
 +           gStats.expand / n / 1e6, gStats.write / n / 1e6, gStats.verts / n);
 +  gStats = NativeStats();
 +  gStatsWindow = now;
