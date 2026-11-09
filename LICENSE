@@ -19,17 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This license covers the code written for mp2-nx. Files taken from other projects keep
-their own licenses, stated in each file's header or in the README next to them:
-
-- switch/deko/mpl/: MPL-2.0 (SwitchWakerHD, via SwitchWaker and Alexgg1014's Aurora).
-  The source of every changed file is in this repository.
-- the rest of switch/deko/ taken from SwitchWaker and Alexgg1014's Aurora: MIT.
-- switch/third_party/nod-c and the Switch code adapted from Alexgg1014's Dusklight Switch
-  port: CC0 (switch/LICENSE-dusklight-switch-CC0.md).
-- switch/sdl/: SDL (zlib).
-- switch/patches/echoes-switch.patch and aurora-switch.patch change Echoes Unbound (MIT)
-  and Aurora (MIT); the patches are under those projects' licenses.

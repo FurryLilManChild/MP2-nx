@@ -49,7 +49,19 @@ the full development history.
 
 ## Credits and licenses
 
-mp2-nx's own code is MIT (see `LICENSE`, which also lists the files under other licenses).
+mp2-nx's own code is MIT (`LICENSE`). Files taken from other projects keep their own licenses, stated in each
+file's header or in the README next to them:
+
+- `switch/deko/mpl/`: MPL-2.0 (SwitchWakerHD, via SwitchWaker and Alexgg1014's Aurora).
+  The source of every changed file is in this repository.
+- The rest of `switch/deko/` taken from SwitchWaker and Alexgg1014's Aurora: MIT.
+- `switch/third_party/nod-c` and the Switch code adapted from Alexgg1014's Dusklight Switch
+  port: CC0 (`switch/LICENSE-dusklight-switch-CC0.md`).
+- `switch/sdl/`: SDL (zlib).
+- `switch/patches/echoes-switch.patch` and `aurora-switch.patch` change Echoes Unbound (MIT)
+  and Aurora (MIT); the patches are under those projects' licenses.
+
+Credits:
 
 - [Echoes Unbound](https://github.com/Odrannnn/MetroidPrime2Port) (MIT) and the Echoes decompilation (CC0).
 - Alexgg1014's Dusklight Switch port (CC0) and his Aurora fork (MIT): much of the Switch groundwork.
