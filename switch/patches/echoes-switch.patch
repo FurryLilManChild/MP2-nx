@@ -504,17 +504,17 @@ index f4ff077ce..298a34ddb 100644
  #else
    munmap(m_base, m_size);
 diff --git a/src/Kyoto/Graphics/DolphinCGraphics.cpp b/src/Kyoto/Graphics/DolphinCGraphics.cpp
-index d215345cf..faf494b43 100644
+index d215345cf..460eccd1d 100644
 --- a/src/Kyoto/Graphics/DolphinCGraphics.cpp
 +++ b/src/Kyoto/Graphics/DolphinCGraphics.cpp
-@@ -54,6 +54,7 @@ int CopyTexelBytes(GXTexFmt fmt) {
- }
+@@ -15,6 +15,7 @@
+ #include <cstdio>
+ #include <thread>
  
- // periodUs: the video rate under the 60 FPS cap, else 1/FpsCap (MP1's FPS cap slider, f1b).
 +extern "C" unsigned long long mp2nx_pace_sleep_ns;  // platform/port_events.cpp (mp2-nx, build 4)
- void PaceFrame(long periodUs) {
-   using clock = std::chrono::steady_clock;
-   static clock::time_point sDeadline = clock::now();
+ namespace {
+ // GXInit (CGraphics::Startup) submits register writes the Aurora worker processes, so a frame
+ // must be open before it runs; the first EndScene closes it.
 @@ -62,6 +63,8 @@ void PaceFrame(long periodUs) {
    sDeadline += period;
    if (sDeadline > now) {

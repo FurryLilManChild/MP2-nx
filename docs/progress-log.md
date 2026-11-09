@@ -5,7 +5,9 @@ Newest first.
 ## 2026-11-09: the GPU map path by default, a frame-budget readout (build 4)
 
 - The GPU map path is the only one by default; MP2_NATIVE_MAP=0 gives the GX path, MP2_NATIVE_MAP=ab the 6 s A/B.
-- A readout at the bottom left while the map is open (switch_menu.cpp), over half-second windows, per frame:
+- A readout at the bottom left while the map is open (switch_menu.cpp), behind the menu's "Map performance"
+  row under "FPS counter" (off by default, map_budget in switch_menu.cfg; the 5 s log line is written either
+  way), over half-second windows, per frame:
   - game: the game thread's work, the frame less its sleep in the frame pacing (mp2nx_pace_sleep_ns, both
     pacers: PortPaceFrame and DolphinCGraphics.cpp's PaceFrame);
   - render: Aurora's render worker busy time less its wait for a swapchain image (dkQueueAcquireImage);

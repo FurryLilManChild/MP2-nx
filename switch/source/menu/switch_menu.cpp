@@ -73,6 +73,7 @@ constexpr const char* kConfigPath = MP2NX_APP_DIR "/switch_menu.cfg";
 float sHandheldScale = 0.f;
 float sDockedScale = 0.f;
 bool sShowFps = false;
+bool sMapBudget = false;  // the map's frame-budget readout (build 4), off for normal play
 bool sMenuButtonsDefaulted = false; // the Switch default for Separate menu buttons was applied once
 bool sDekoTest = false;             // run the deko3d test on the next start (once; cleared when it starts)
 bool sDekoTestThisStart = false;    // it runs on this start
@@ -95,6 +96,8 @@ void LoadConfig() {
       sDockedScale = v;
     } else if (std::sscanf(line, "fps_counter=%d", &i) == 1) {
       sShowFps = i != 0;
+    } else if (std::sscanf(line, "map_budget=%d", &i) == 1) {
+      sMapBudget = i != 0;
     } else if (std::sscanf(line, "menu_buttons_defaulted=%d", &i) == 1) {
       sMenuButtonsDefaulted = i != 0;
     } else if (std::sscanf(line, "deko3d_test=%d", &i) == 1) {
@@ -110,8 +113,8 @@ void SaveConfig() {
     std::fprintf(stderr, "mp2-nx: menu: could not write %s\n", kConfigPath);
     return;
   }
-  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmenu_buttons_defaulted=%d\ndeko3d_test=%d\n",
-               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0, sDekoTest ? 1 : 0);
+  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmap_budget=%d\nmenu_buttons_defaulted=%d\ndeko3d_test=%d\n",
+               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMapBudget ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0, sDekoTest ? 1 : 0);
   std::fclose(f);
 }
 
@@ -740,6 +743,12 @@ std::vector< Row > BuildRows(int page) {
                       SaveConfig();
                     },
                     nullptr});
+    rows.push_back({"Map performance", OnOff(sMapBudget), "Frame timings at the bottom left while the map is open",
+                    [](int) {
+                      sMapBudget = !sMapBudget;
+                      SaveConfig();
+                    },
+                    nullptr});
     rows.push_back({"Anti-aliasing", PortOverlay::Msaa() >= 4 ? "4x MSAA" : "Off",
                     "Smooths jagged edges. Costs GPU time, try it handheld first", [](int) {
                       PortOverlay::SetMsaa(PortOverlay::Msaa() >= 4 ? 1 : 4);
@@ -1037,7 +1046,7 @@ void DrawAlways() {
           sLogWindows = sLogGpuWindows = 0;
         }
       }
-      if (sFpsWin > 0.f) {
+      if (sMapBudget && sFpsWin > 0.f) {
         char buf[160];
         char gpu[24];
         if (sGpu >= 0.f) {
