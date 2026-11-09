@@ -9,13 +9,9 @@
 #   Tint's GLSL writer: built with Dawn by switch/build_deps.sh (TINT_BUILD_GLSL_WRITER=ON, the two
 #     dawn-switch-tint-*.patch options), its archives in $MP2NX_PREFIX/lib/tint
 #   switch/deko/shader_translate.cpp: SwitchWaker's WGSL -> GLSL translation (MIT, via Alek)
-# On by default in the deko3d test builds (MP2NX_APP_NAME other than mp2-nx), off for releases.
-if(MP2NX_APP_NAME STREQUAL "mp2-nx")
-  set(_dk_default OFF)
-else()
-  set(_dk_default ON)
-endif()
-option(MP2NX_DEKO3D "link the deko3d toolchain and its smoke test (phase 0)" ${_dk_default})
+# On by default: deko3d is the default renderer from v0.5.0 (Vulkan is the other choice in the Switch menu).
+# OFF builds a Vulkan-only NRO.
+option(MP2NX_DEKO3D "link the deko3d renderer (the default; Vulkan stays selectable)" ON)
 if(NOT MP2NX_DEKO3D)
   return()
 endif()

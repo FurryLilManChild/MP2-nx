@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-09: v0.5.0 cleanup, deko3d the default
+
+- The owner: v0.5.0 is the next release. One track: the NRO and SD folder are "mp2-nx" again (the deko3d test
+  builds were "mp2-nx-deko"), and MP2NX_DEKO3D is on by default whatever the name.
+- deko3d is the default renderer. The menu's choice is now a `renderer_vulkan` file in the app folder (Vulkan
+  when it exists); the test builds' `renderer_deko3d` is removed when seen. The fallback (two deko3d starts
+  without a picture) now writes `renderer_vulkan`, so the menu shows the truth and can switch back.
+- "(test)" is gone from the renderer row, its note and the start toast (no toast at all now unless it fell back).
+  The dead deko3d smoke-test flag (deko3d_test in switch_menu.cfg) is gone.
+- Version 0.5.0 (MP2NX_VERSION in switch/cmake/mp2_switch_deps.cmake): the NRO's title info (was 0.1.0) and
+  the System page's last row ("mp2-nx 0.5.0").
+- Compiled (build 8, not delivered yet: the rest of the release list is open).
+
 ## 2026-11-09: beams on L + D-pad under twin stick (build 6)
 
 - The owner asked how beam swaps work with twin stick. Found by reading the code, not on hardware: they

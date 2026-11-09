@@ -40,7 +40,6 @@ extern "C" void mp2nx_start_log_flusher(void);
 extern "C" void aurora_frame_capture_request(const char* dir);
 extern "C" unsigned aurora_frame_capture_done(char* lastDir, unsigned size);
 #if MP2NX_DEKO3D
-// switch/source/deko/dk_smoke.cpp: the deko3d phase 0 smoke test
 // switch/deko/dk_surface.cpp: the renderer of this start and the choice for the next
 extern "C" bool mp2nx_dk_active(void);
 extern "C" void mp2nx_boot_mark(const char* what, const char* stage);  // load_boost.cpp
@@ -75,8 +74,6 @@ float sDockedScale = 0.f;
 bool sShowFps = false;
 bool sMapBudget = false;  // the map's frame-budget readout (build 4), off for normal play
 bool sMenuButtonsDefaulted = false; // the Switch default for Separate menu buttons was applied once
-bool sDekoTest = false;             // run the deko3d test on the next start (once; cleared when it starts)
-bool sDekoTestThisStart = false;    // it runs on this start
 bool sConfigLoaded = false;
 int sAppliedMode = -1; // AppletOperationMode the resolution was last applied for
 
@@ -100,8 +97,6 @@ void LoadConfig() {
       sMapBudget = i != 0;
     } else if (std::sscanf(line, "menu_buttons_defaulted=%d", &i) == 1) {
       sMenuButtonsDefaulted = i != 0;
-    } else if (std::sscanf(line, "deko3d_test=%d", &i) == 1) {
-      sDekoTest = i != 0;
     }
   }
   std::fclose(f);
@@ -113,8 +108,8 @@ void SaveConfig() {
     std::fprintf(stderr, "mp2-nx: menu: could not write %s\n", kConfigPath);
     return;
   }
-  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmap_budget=%d\nmenu_buttons_defaulted=%d\ndeko3d_test=%d\n",
-               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMapBudget ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0, sDekoTest ? 1 : 0);
+  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmap_budget=%d\nmenu_buttons_defaulted=%d\n",
+               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMapBudget ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0);
   std::fclose(f);
 }
 
@@ -812,9 +807,9 @@ std::vector< Row > BuildRows(int page) {
     std::snprintf(fps, sizeof(fps), "%.0f", static_cast< double >(sFps));
     rows.push_back({"Frames per second", fps, "", nullptr, nullptr, false});
 #if MP2NX_DEKO3D
-    rows.push_back({"Renderer (next start)", mp2nx_dk_chosen() ? "deko3d (test)" : "Vulkan",
-                    mp2nx_dk_active() ? "This start uses deko3d. Vulkan is the safe choice; restart to apply"
-                                      : "deko3d is the new renderer, still being tested. Restart to apply",
+    rows.push_back({"Renderer (next start)", mp2nx_dk_chosen() ? "deko3d" : "Vulkan",
+                    mp2nx_dk_active() ? "This start uses deko3d, the default. Vulkan is the other choice; restart to apply"
+                                      : "This start uses Vulkan. deko3d is the default and the faster one; restart to apply",
                     [](int) {
                       const bool next = !mp2nx_dk_chosen();
                       mp2nx_dk_set_chosen(next);
@@ -828,7 +823,7 @@ std::vector< Row > BuildRows(int page) {
       rows.push_back({"Build", build, mp2nx_build_id, nullptr, nullptr});
     }
     rows.push_back({"Logs", mp2nx_logs_ok() ? "OK" : "Problem", mp2nx_log_status(), nullptr, nullptr});
-    rows.push_back({MP2NX_APP_NAME, "Echoes Unbound on Switch", "", nullptr, nullptr, false});
+    rows.push_back({MP2NX_APP_NAME " " MP2NX_VERSION, "Echoes Unbound on Switch", "", nullptr, nullptr, false});
     break;
   }
   }
@@ -873,9 +868,7 @@ void DrawAlways() {
     mp2nx_start_log_flusher(); // misc_switch.cpp
 #if MP2NX_DEKO3D
     if (mp2nx_dk_fell_back()) {
-      Toast("deko3d did not show a picture twice, so the game is back on Vulkan", 8000);
-    } else if (mp2nx_dk_active()) {
-      Toast("Renderer: deko3d (test). Switch back in System > Renderer", 6000);
+      Toast("deko3d did not show a picture twice, so the game is on Vulkan. Switch back in System > Renderer", 8000);
     }
 #endif
   }

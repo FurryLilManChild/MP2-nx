@@ -58,7 +58,10 @@ void flush_locked(const char* why);
 
 namespace {
 
-constexpr const char* kChoicePath = MP2NX_APP_DIR "/renderer_deko3d";
+// mp2-nx v0.5.0: deko3d is the default renderer. This file, written from the Switch menu, picks Vulkan instead.
+// (The test builds' opposite marker, renderer_deko3d, is removed when seen.)
+constexpr const char* kVulkanPath = MP2NX_APP_DIR "/renderer_vulkan";
+constexpr const char* kOldChoicePath = MP2NX_APP_DIR "/renderer_deko3d";
 constexpr const char* kBootPath = MP2NX_APP_DIR "/deko3d_boot";
 
 bool g_on = false;
@@ -190,20 +193,27 @@ bool choose() {
     static bool decided = false;
     if (decided) return g_on;
     decided = true;
-    FILE* f = fopen(kChoicePath, "r");
-    if (!f) return false;
-    fclose(f);
+    remove(kOldChoicePath);
+    if (FILE* f = fopen(kVulkanPath, "r")) {
+        fclose(f);
+        log("renderer: Vulkan (chosen in the menu)");
+        return false;
+    }
     const int failed = read_boot_count();
     if (failed >= 2) {
-        log("the last %d starts with deko3d never showed a picture: back to Vulkan (the choice is reset)", failed);
-        remove(kChoicePath);
+        log("the last %d starts with deko3d never showed a picture: Vulkan from now on (System > Renderer "
+            "switches back)", failed);
+        if (FILE* f = fopen(kVulkanPath, "w")) {
+            fputs("vulkan\n", f);
+            fclose(f);
+        }
         remove(kBootPath);
         g_fellBack = true;
         return false;
     }
     write_boot_count(failed + 1);
     g_on = true;
-    log("renderer: deko3d (the test renderer, chosen in the menu); Aurora's device is Dawn's Null device");
+    log("renderer: deko3d (the default); Aurora's device is Dawn's Null device");
     // mp2-nx (deko-11): <app folder>/deko3d_env.txt, NAME=VALUE lines set before Aurora reads them (for A/B
     // tests without a new build, e.g. AURORA_DUAL_SOURCE=0)
     if (FILE* env = fopen(MP2NX_APP_DIR "/deko3d_env.txt", "r")) {
@@ -258,21 +268,18 @@ void mp2nx_dk_shutdown(void) {
     log("shutting down: no more submits or presents");
 }
 bool mp2nx_dk_chosen(void) {
-    FILE* f = fopen(kChoicePath, "r");
-    if (!f) return false;
+    FILE* f = fopen(kVulkanPath, "r");
+    if (!f) return true;
     fclose(f);
-    return true;
+    return false;
 }
 void mp2nx_dk_set_chosen(bool on) {
+    remove(kBootPath);
     if (on) {
-        if (FILE* f = fopen(kChoicePath, "w")) {
-            fputs("deko3d\n", f);
-            fclose(f);
-        }
-        remove(kBootPath);
-    } else {
-        remove(kChoicePath);
-        remove(kBootPath);
+        remove(kVulkanPath);
+    } else if (FILE* f = fopen(kVulkanPath, "w")) {
+        fputs("vulkan\n", f);
+        fclose(f);
     }
 }
 

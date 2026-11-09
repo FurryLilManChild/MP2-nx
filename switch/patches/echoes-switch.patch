@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..d8d537a80 100644
+index ef1c8c60d..3317658ab 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -40,7 +40,7 @@ index ef1c8c60d..d8d537a80 100644
 +        ${MP2NX_ROOT}/switch/source/platform/device_switch.cpp)
 +    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
 +    set_property(SOURCE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp ${MP2NX_ROOT}/switch/source/platform/startup.cpp
-+        APPEND PROPERTY COMPILE_DEFINITIONS "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"")
++        APPEND PROPERTY COMPILE_DEFINITIONS "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"" "MP2NX_VERSION=\"${MP2NX_VERSION}\"")
 +    set_source_files_properties(${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp PROPERTIES
 +        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui;${CMAKE_CURRENT_SOURCE_DIR}/platform/input")
 +    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
@@ -76,7 +76,7 @@ index ef1c8c60d..d8d537a80 100644
 +    else()
 +        set(_mp2nx_title "Metroid Prime 2: Echoes (${MP2NX_APP_NAME})")
 +    endif()
-+    nx_generate_nacp(mp2-nx.nacp NAME "${_mp2nx_title}" AUTHOR "mp2-nx" VERSION "0.1.0")
++    nx_generate_nacp(mp2-nx.nacp NAME "${_mp2nx_title}" AUTHOR "mp2-nx" VERSION "${MP2NX_VERSION}")
 +    # The starter shader list (initial_pipeline_cache.db, made from the owner's own caches) is game-derived, so it
 +    # lives outside the repo: MP2NX_ROMFS_DIR, default <build>/../romfs. romfs:/ is Aurora's resources path.
 +    set(MP2NX_ROMFS_DIR "${CMAKE_BINARY_DIR}/../romfs" CACHE PATH "romfs folder for the NRO (outside the repo)")
