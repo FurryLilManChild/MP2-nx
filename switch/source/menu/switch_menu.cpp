@@ -630,7 +630,7 @@ std::vector< Row > BuildRows(int page) {
   }
   case kControls: {
     rows.push_back({"Twin stick aiming", OnOff(PortMouse::StickEnabled()),
-                    "Right stick aims freely, like a modern shooter, instead of free-look",
+                    "Right stick aims freely. Beams: hold L and press the D-pad (up Power, left Dark, right Light, down Annihilator)",
                     [](int) { PortMouse::SetStickEnabled(!PortMouse::StickEnabled()); Changed(true); }, nullptr});
     if (PortMouse::StickEnabled()) {
       char speed[32];

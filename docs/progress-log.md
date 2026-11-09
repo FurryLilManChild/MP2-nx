@@ -2,6 +2,24 @@
 
 Newest first.
 
+## 2026-11-09: beams on L + D-pad under twin stick (build 6)
+
+- The owner asked how beam swaps work with twin stick. Found by reading the code, not on hardware: they
+  did not. Retail picks beams with the C-stick (CPlayerGun::HandleBeamChange, a direction past 0.65),
+  and twin stick aims with that same stick, so a hard turn would swap to any owned beam. Not seen yet
+  because only the Power Beam is owned so far.
+- Echoes Unbound's twin-stick beam shift (BindBeamChords: hold LB, D-pad up Power, left Dark, right
+  Light, down Annihilator, the C-stick's directions) was gated on PortTouch::TwinStick(), the touch
+  overlay's layout, which is off on the Switch, and its pad shift also needed touch controls off.
+- Fix: BindBeamChords also runs when PortMouse::StickEnabled() (the Switch menu's "Twin stick
+  aiming"), adding the pad's L shift then (still skipped if a remap puts another button on L; the
+  Switch's controller, SDL type Standard, leaves L unbound by default). The keyboard's Left Shift
+  stays a touch-twin-only shift. HandleBeamChange ignores the C-stick while stick aim is on. The same
+  shift springs the ball in morph ball, which makes the menu's Spring Ball note ("L too with Twin
+  stick") true; before this it was not. The D-pad alone still picks visors: the chord (rank 1,
+  two inputs) claims the D-pad press while L is held.
+- The Twin stick aiming row's note now lists the beam directions.
+
 ## 2026-11-09: the GPU map path by default, a frame-budget readout (build 4)
 
 - The GPU map path is the only one by default; MP2_NATIVE_MAP=0 gives the GX path, MP2_NATIVE_MAP=ab the 6 s A/B.
