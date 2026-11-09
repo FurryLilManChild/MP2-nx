@@ -2,6 +2,18 @@
 
 Newest first.
 
+## 2026-11-09: build 3 result: the map at 60 fps
+
+The owner's test (deko3d, stock clocks, the same heavy zoomed-out map view, A/B every 6 s): NATIVE (GPU) ran a steady
+181 frames per 3 s window (60 fps) against OLD (GX)'s 71 (23.7 fps). The map looked the same on both (the owner).
+Every flush took the GPU path: no refusals, no CPU fallback, about 7,800 fill triangles and 22,500 segments in
+one draw. Map draw on the game thread 4.1 to 5.0 ms (queueing about 2.0 ms, the hand-off 1.0 to 1.5 ms) against
+40.7 ms in build 2. Two map pipelines were made (the first in 360 ms, the hitch on first open), both alpha mode 0:
+this view never set a constant dst alpha, so the dst-alpha cases are compiled and checked offline but not yet
+seen on hardware. Build 2's refusal happened on another view; the owner saw no wrong drawing on either.
+Headroom is not measured yet: the vsync wait hides it. Estimate from build 2's numbers: about 14 of 16.7 ms on
+the game thread.
+
 ## 2026-11-08: the map's constant destination alpha on the GPU path (build 3)
 
 What broke: build 2's GPU map draw never ran. Every map flush was refused with "a constant destination
