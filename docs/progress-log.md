@@ -17,6 +17,9 @@ Newest first.
 - Release candidate: build 10 (commit 265af38), NRO sha256 20669bd5..., zip mp2-nx-v0.5.0-switch.zip sha256
   74f63f0f... (the NRO, README.txt, the disc note, LICENSE-mp2-nx.txt and the three licenses from 0.1.0).
   Checks before publishing: a Vulkan start, and a start with an empty cache folder.
+- The owner tested build 10 (a deko3d start, a Vulkan start, a start with an empty cache folder) and was happy with
+  all three. He made the repo public and published the release: tag MP2-nx-0.5.0, "MP2 NX Initial release 0.5.0",
+  marked pre-release; the attached zip's sha256 (74f63f0f...) matches the one built here.
 
 ## 2026-11-09: v0.5.0 cleanup, deko3d the default
 
