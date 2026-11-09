@@ -2,6 +2,21 @@
 
 Newest first.
 
+## 2026-11-08: the map's constant destination alpha on the GPU path (build 3)
+
+What broke: build 2's GPU map draw never ran. Every map flush was refused with "a constant destination
+alpha" and drawn the CPU way (NATIVE 19.9 fps against 23.8 on OLD (GX), the CPU fallback 36.2 ms of the
+40.7 ms map draw, 60 of 61 flushes).
+
+Cause: the map sets GXSetDstAlpha, and aurora_map_draw refused that state instead of handling it.
+
+Fix: the map pipeline takes dst_alpha_mode's three cases. Plain: the colour's alpha. Replace (no source-alpha
+blend): the fragment shader writes alpha 1 and the blend's alpha is the constant. Dual source (a source-alpha
+blend): the colour goes out with alpha 1 and its alpha as the second source, the colour factors remapped to
+Src1Alpha by to_blend_state. The draw sets the blend constant (dst alpha / 255). Without dual-source blending
+the source-alpha case still falls back to the CPU. New log lines give each flush state's dst alpha, blend mode
+and factors, and each pipeline's blend and alpha mode.
+
 ## 2026-11-08: the map on the GPU (build 2)
 
 - Build 1's A/B log (busy zoomed-out map, deko3d, stock clocks), the logs correct this time (build 1 stamp, every

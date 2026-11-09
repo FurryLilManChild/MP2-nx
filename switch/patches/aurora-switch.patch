@@ -1287,10 +1287,10 @@ index efddaaf2a..54d320c46 100644
 +  *grows = sStatGrows.load(std::memory_order_relaxed);
 +}
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
-index ac6a3b6cb..d74e45305 100644
+index ac6a3b6cb..68817deed 100644
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
-@@ -1034,3 +1034,408 @@ void shutdown() noexcept {
+@@ -1034,3 +1034,466 @@ void shutdown() noexcept {
    texture::shutdown();
  }
  } // namespace aurora::gx
@@ -1339,6 +1339,7 @@ index ac6a3b6cb..d74e45305 100644
 +#include <aurora/gfx.h>
 +#include <array>
 +#include <chrono>
++#include <string>
 +#include <cstdio>
 +#include <vector>
 +
@@ -1361,6 +1362,7 @@ index ac6a3b6cb..d74e45305 100644
 +  uint32_t writeMask, depthWrite, depthCompare, cull;
 +  int32_t depthBias;
 +  float slope, clamp;
++  uint32_t alphaMode; // 0 the colour's alpha, 1 alpha 1 (a constant dst alpha), 2 dual source (it, and the colour's alpha as the second source)
 +  bool operator==(const MapPipeKey& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
 +};
 +
@@ -1369,6 +1371,7 @@ index ac6a3b6cb..d74e45305 100644
 +  gfx::Range inst;
 +  gfx::Range uniform;
 +  uint32_t count;
++  uint32_t dstAlpha; // GXSetDstAlpha's constant, UINT32_MAX when off
 +};
 +static_assert(sizeof(MapPayload) <= gfx::InlineDrawPayloadSize);
 +
@@ -1458,7 +1461,7 @@ index ac6a3b6cb..d74e45305 100644
 +struct MapState {
 +  gfx::DrawTypeId drawType = gfx::InvalidDrawType;
 +  // render worker only
-+  wgpu::ShaderModule module;
++  std::array<wgpu::ShaderModule, 3> modules; // by MapPipeKey::alphaMode
 +  wgpu::BindGroupLayout bindLayout;
 +  wgpu::PipelineLayout pipelineLayout;
 +  std::vector<MapPipe> pipes;
@@ -1480,11 +1483,34 @@ index ac6a3b6cb..d74e45305 100644
 +    }
 +  }
 +  const unsigned long long t0 = map_now_ns();
-+  if (!g_map.module) {
++  const uint32_t mode = key.alphaMode < 3 ? key.alphaMode : 0;
++  if (!g_map.modules[mode]) {
++    // The constant destination alpha as Aurora's GX shaders do it (apply_dst_alpha_mode): the blend's alpha
++    // is the constant times the shader's alpha, so the shader writes 1; a blend that weighs the colour by its
++    // alpha takes that alpha from the second (dual) source.
++    std::string source = MapSource;
++    const std::string tail = "  return in.color;\n}";
++    const size_t at = source.rfind(tail);
++    if (mode == 1 && at != std::string::npos) {
++      source.replace(at, tail.size(), "  return vec4f(in.color.rgb, 1.0);\n}");
++    } else if (mode == 2 && at != std::string::npos) {
++      source.replace(at, tail.size(), "  return MapDualOut(vec4f(in.color.rgb, 1.0), in.color);\n}");
++      const std::string head = "fn fs_main(in: VOut) -> @location(0) vec4f {";
++      const size_t headAt = source.find(head);
++      if (headAt != std::string::npos) {
++        source.replace(headAt, head.size(), "fn fs_main(in: VOut) -> MapDualOut {");
++      }
++      source.insert(0, "enable dual_source_blending;\n");
++      source += "struct MapDualOut {\n  @location(0) @blend_src(0) color: vec4f,\n  @location(0) @blend_src(1) blend: vec4f,\n};\n";
++    }
 +    wgpu::ShaderSourceWGSL wgsl{};
-+    wgsl.code = MapSource;
-+    const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = "mp2-nx Map Module"};
-+    g_map.module = ctx.device.CreateShaderModule(&md);
++    wgsl.code = source.c_str();
++    static constexpr const char* labels[3] = {"mp2-nx Map Module", "mp2-nx Map Module (dst alpha)",
++                                              "mp2-nx Map Module (dst alpha, dual source)"};
++    const wgpu::ShaderModuleDescriptor md{.nextInChain = &wgsl, .label = labels[mode]};
++    g_map.modules[mode] = ctx.device.CreateShaderModule(&md);
++  }
++  if (!g_map.bindLayout) {
 +    const wgpu::BindGroupLayoutEntry entry{
 +        .binding = 0,
 +        .visibility = wgpu::ShaderStage::Vertex,
@@ -1528,7 +1554,7 @@ index ac6a3b6cb..d74e45305 100644
 +    };
 +  }
 +  const wgpu::FragmentState fragment{
-+      .module = g_map.module,
++      .module = g_map.modules[mode],
 +      .entryPoint = "fs_main",
 +      .targetCount = ctx.layout.colorAttachmentCount,
 +      .targets = targets.data(),
@@ -1544,7 +1570,7 @@ index ac6a3b6cb..d74e45305 100644
 +  const wgpu::RenderPipelineDescriptor descriptor{
 +      .label = "mp2-nx Map Pipeline",
 +      .layout = g_map.pipelineLayout,
-+      .vertex = {.module = g_map.module, .entryPoint = "vs_main", .bufferCount = 1, .buffers = &vertexLayout},
++      .vertex = {.module = g_map.modules[mode], .entryPoint = "vs_main", .bufferCount = 1, .buffers = &vertexLayout},
 +      .primitive = {.topology = wgpu::PrimitiveTopology::TriangleList,
 +                    .frontFace = wgpu::FrontFace::CW,
 +                    .cullMode = static_cast<wgpu::CullMode>(key.cull)},
@@ -1555,9 +1581,11 @@ index ac6a3b6cb..d74e45305 100644
 +  wgpu::RenderPipeline pipeline = ctx.device.CreateRenderPipeline(&descriptor);
 +  std::fprintf(stderr,
 +               "map: GPU path: pipeline %zu made in %.1f ms (%s; %u colour targets, %u samples, cull %u, depth "
-+               "compare %u, depth write %u)\n",
++               "compare %u, depth write %u, alpha mode %u (0 plain, 1 constant dst alpha, 2 that with dual source), "
++               "blend colour %u/%u/%u alpha %u/%u/%u, write mask %u)\n",
 +               g_map.pipes.size() + 1, double(map_now_ns() - t0) / 1e6, pipeline ? "ok" : "FAILED",
-+               ctx.layout.colorAttachmentCount, ctx.layout.sampleCount, key.cull, key.depthCompare, key.depthWrite);
++               ctx.layout.colorAttachmentCount, ctx.layout.sampleCount, key.cull, key.depthCompare, key.depthWrite,
++               mode, key.colorOp, key.colorSrc, key.colorDst, key.alphaOp, key.alphaSrc, key.alphaDst, key.writeMask);
 +  if (pipeline) {
 +    g_map.pipes.push_back(MapPipe{key, ctx.layout.key, ctx.layout.sampleCount, pipeline});
 +  }
@@ -1589,6 +1617,10 @@ index ac6a3b6cb..d74e45305 100644
 +  pass.SetPipeline(pipeline);
 +  pass.SetBindGroup(0, g_map.group, 1, &p.uniform.offset);
 +  pass.SetVertexBuffer(0, ctx.vertexBuffer, p.inst.offset, p.inst.size);
++  if (p.dstAlpha != UINT32_MAX) {
++    const wgpu::Color constant{0.f, 0.f, 0.f, p.dstAlpha / 255.f};
++    pass.SetBlendConstant(&constant);
++  }
 +  pass.Draw(12, p.count);
 +}
 +
@@ -1624,9 +1656,33 @@ index ac6a3b6cb..d74e45305 100644
 +  }
 +  const bool hasAlpha = efb_has_alpha(g_gxState.pixelFmt);
 +  const uint32_t dstAlpha = hasAlpha && g_gxState.alphaUpdate ? g_gxState.dstAlpha : UINT32_MAX;
-+  if (dstAlpha != UINT32_MAX) {
-+    map_refuse("a constant destination alpha");
-+    return false;
++  // dst_alpha_mode's choice, for the map's state
++  uint32_t alphaMode = 0;
++  if (dstAlpha != UINT32_MAX && dstAlpha != 0) {
++    const auto usesSourceAlpha = [](GXBlendFactor factor) {
++      return factor == GX_BL_SRCALPHA || factor == GX_BL_INVSRCALPHA;
++    };
++    const bool needsSourceAlpha =
++        g_gxState.colorUpdate && g_gxState.blendMode == GX_BM_BLEND &&
++        (usesSourceAlpha(g_gxState.blendFacSrc) || usesSourceAlpha(g_gxState.blendFacDst));
++    if (!needsSourceAlpha) {
++      alphaMode = 1;
++    } else if (webgpu::g_dualSourceBlendingSupported) {
++      alphaMode = 2;
++    } else {
++      map_refuse("a constant destination alpha under a source-alpha blend, and no dual-source blending");
++      return false;
++    }
++  }
++  static uint32_t saidModes = 0;
++  if ((saidModes & (1u << alphaMode)) == 0) {
++    saidModes |= 1u << alphaMode;
++    std::fprintf(stderr,
++                 "map: GPU path: a flush with dst alpha %d (alpha mode %u), blend mode %d (src %d, dst %d), colour "
++                 "update %d, alpha update %d\n",
++                 dstAlpha == UINT32_MAX ? -1 : int(dstAlpha), alphaMode, int(g_gxState.blendMode),
++                 int(g_gxState.blendFacSrc), int(g_gxState.blendFacDst), int(g_gxState.colorUpdate),
++                 int(g_gxState.alphaUpdate));
 +  }
 +  if (g_gxState.fog.type != GX_FOG_NONE) {
 +    static bool said = false;
@@ -1646,7 +1702,7 @@ index ac6a3b6cb..d74e45305 100644
 +    return factor;
 +  };
 +  const wgpu::BlendState blend = to_blend_state(g_gxState.blendMode, blendFactor(g_gxState.blendFacSrc),
-+                                                blendFactor(g_gxState.blendFacDst), g_gxState.blendOp, dstAlpha, false);
++                                                blendFactor(g_gxState.blendFacDst), g_gxState.blendOp, dstAlpha, alphaMode == 2);
 +  const GXCullMode cull = g_gxState.cullMode;
 +  const auto [polygonOffset, polygonOffsetScale] = polygon_offset_for_cull_mode(cull);
 +  MapPayload p{};
@@ -1664,6 +1720,8 @@ index ac6a3b6cb..d74e45305 100644
 +  p.key.depthBias = round_away_from_zero<int32_t>((UseReversedZ ? -1.0f : 1.0f) * polygonOffset);
 +  p.key.slope = (UseReversedZ ? -1.0f : 1.0f) * polygonOffsetScale;
 +  p.key.clamp = webgpu::g_hasCoreFeatures ? g_gxState.clamp : 0.0f;
++  p.key.alphaMode = alphaMode;
++  p.dstAlpha = dstAlpha;
 +
 +  MapUniform u{};
 +  const auto& pos = g_gxState.pnMtx[g_gxState.currentPnMtx].pos;
