@@ -1287,10 +1287,10 @@ index efddaaf2a..54d320c46 100644
 +  *grows = sStatGrows.load(std::memory_order_relaxed);
 +}
 diff --git a/lib/gx/gx.cpp b/lib/gx/gx.cpp
-index ac6a3b6cb..68817deed 100644
+index ac6a3b6cb..31b82f590 100644
 --- a/lib/gx/gx.cpp
 +++ b/lib/gx/gx.cpp
-@@ -1034,3 +1034,466 @@ void shutdown() noexcept {
+@@ -1034,3 +1034,472 @@ void shutdown() noexcept {
    texture::shutdown();
  }
  } // namespace aurora::gx
@@ -1674,12 +1674,18 @@ index ac6a3b6cb..68817deed 100644
 +      return false;
 +    }
 +  }
-+  static uint32_t saidModes = 0;
-+  if ((saidModes & (1u << alphaMode)) == 0) {
-+    saidModes |= 1u << alphaMode;
++  // Each change of the map's alpha state is logged (build 3 met a constant dst alpha on one run and none on
++  // the next; this says when it happens and how it was drawn).
++  static uint32_t lastState = UINT32_MAX - 1, stateLines = 0;
++  const uint32_t state = (alphaMode << 8) ^ dstAlpha ^ (uint32_t(g_gxState.blendMode) << 12) ^
++                         (uint32_t(g_gxState.blendFacSrc) << 16) ^ (uint32_t(g_gxState.blendFacDst) << 20);
++  if (state != lastState && stateLines < 40) {
++    lastState = state;
++    ++stateLines;
 +    std::fprintf(stderr,
-+                 "map: GPU path: a flush with dst alpha %d (alpha mode %u), blend mode %d (src %d, dst %d), colour "
-+                 "update %d, alpha update %d\n",
++                 "map: GPU path: the map's flushes now have dst alpha %d (alpha mode %u: 0 plain, 1 constant dst "
++                 "alpha, 2 that with dual source), blend mode %d (src %d, dst %d), colour update %d, alpha update "
++                 "%d\n",
 +                 dstAlpha == UINT32_MAX ? -1 : int(dstAlpha), alphaMode, int(g_gxState.blendMode),
 +                 int(g_gxState.blendFacSrc), int(g_gxState.blendFacDst), int(g_gxState.colorUpdate),
 +                 int(g_gxState.alphaUpdate));

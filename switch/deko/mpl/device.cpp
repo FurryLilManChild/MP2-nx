@@ -19,6 +19,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <atomic>
 #include <cstring>
 
 extern "C" char* fake_heap_end;
@@ -161,13 +162,54 @@ void empty_image_init() {
     g_emptyReady = true;
 }
 
-void submit_list() {
+// mp2-nx (build 4): the GPU's busy time per frame, for the map's frame-budget readout. Each command list a
+// frame submits is bracketed by two timestamp reports in that frame's query region (memory.cpp, otherwise
+// unused); once the frame's fence has signalled (frame_begin of the frame kFrames later), the pairs are summed.
+// Gaps between lists (the GPU idle while the CPU records the next) are left out. deko3d reports GPU ticks:
+// ns = ticks * 625 / 384, as the frame capture's (dk_encoder.cpp).
+constexpr uint32_t kGpuReportCap = 128;
+uint32_t g_gpuReports[kFrames] = {};
+std::atomic<uint64_t> g_gpuBusyNs{0}, g_gpuFrames{0}, g_acquireTotalNs{0};
+
+void gpu_report(uint64_t frame) {
+    uint32_t& n = g_gpuReports[frame % kFrames];
+    const QueryRegion q = query_region(frame);
+    if (n >= kGpuReportCap || (n + 1) * 16 > q.size) return;
+    dkCmdBufReportCounter(R.cmd, DkCounter_Timestamp, q.gpu + uint64_t(n) * 16);
+    n++;
+}
+
+// after frame_begin(frame) waited for the slot's fence: the reports of the frame kFrames earlier are written
+void gpu_collect(uint64_t frame) {
+    uint32_t& n = g_gpuReports[frame % kFrames];
+    if (n >= 2) {
+        const QueryRegion q = query_region(frame);
+        uint64_t ticks = 0;
+        for (uint32_t i = 0; i + 1 < n; i += 2) {
+            uint64_t a, b;
+            memcpy(&a, q.cpu + size_t(i) * 16 + 8, 8);
+            memcpy(&b, q.cpu + size_t(i + 1) * 16 + 8, 8);
+            if (b > a) ticks += b - a;
+        }
+        g_gpuBusyNs.fetch_add(ticks * 625 / 384, std::memory_order_relaxed);
+        g_gpuFrames.fetch_add(1, std::memory_order_relaxed);
+    }
+    n = 0;
+}
+
+// last: the present's submit (its end report went in before the frame's fence, so the times are written
+// when the fence says the frame is done); a mid-frame submit ends its list's bracket and opens the next one's
+void submit_list(bool last = false) {
     check_queue("a submit");
+    if (!last && R.frameOpen) gpu_report(R.frame + 1);
     const DkCmdList list = dkCmdBufFinishList(R.cmd);
-    std::lock_guard<std::mutex> lock(fence_mutex());
-    dkQueueSubmitCommands(R.queue, list);
-    fence_submitted();
-    g_submits.submits++;
+    {
+        std::lock_guard<std::mutex> lock(fence_mutex());
+        dkQueueSubmitCommands(R.queue, list);
+        fence_submitted();
+        g_submits.submits++;
+    }
+    if (!last && R.frameOpen) gpu_report(R.frame + 1);
 }
 
 }  // namespace
@@ -181,6 +223,8 @@ void frame_open() {
     check_queue("the frame fence");
     frame_begin(frame);
     g_times.fenceNs += now_ns() - t0;
+    gpu_collect(frame);
+    gpu_report(frame);  // the frame's first list starts
     g_frameOpenNs = now_ns();
     descriptors_frame_start();
     objects_frame_start_hook();
@@ -220,6 +264,7 @@ int swapchain_acquire() {
     check_queue("acquiring a swapchain image");
     g_acquired = dkQueueAcquireImage(R.queue, g_swapchain);
     g_times.acquireNs += now_ns() - t0;
+    g_acquireTotalNs.fetch_add(now_ns() - t0, std::memory_order_relaxed);
     return g_acquired;
 }
 
@@ -231,8 +276,9 @@ void swapchain_present() {
     frame_open();
     const uint64_t frame = R.frame + 1;
     const uint64_t t0 = now_ns();
+    gpu_report(frame);  // the frame's last list ends, before its fence
     frame_end();
-    submit_list();
+    submit_list(true);
     check_queue("the present");
     dkQueuePresentImage(R.queue, g_swapchain, g_acquired);
     g_acquired = -1;
@@ -329,3 +375,11 @@ void device_shutdown() {
 }
 
 }  // namespace swdk
+
+// mp2-nx (build 4): cumulative since start, for the map's frame-budget readout (switch_menu.cpp): the GPU's busy
+// time over the frames measured, and the render worker's time waiting for a swapchain image.
+extern "C" void mp2nx_dk_gpu_times(uint64_t* gpuBusyNs, uint64_t* gpuFrames, uint64_t* acquireNs) {
+    if (gpuBusyNs) *gpuBusyNs = swdk::g_gpuBusyNs.load(std::memory_order_relaxed);
+    if (gpuFrames) *gpuFrames = swdk::g_gpuFrames.load(std::memory_order_relaxed);
+    if (acquireNs) *acquireNs = swdk::g_acquireTotalNs.load(std::memory_order_relaxed);
+}

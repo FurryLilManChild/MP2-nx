@@ -314,6 +314,33 @@ index a3d106a14..5c63494ac 100644
    aurora_update();
  
    // The game's entry owns the OS context and memory system. It returns void, so
+diff --git a/platform/port_events.cpp b/platform/port_events.cpp
+index 3cbd20668..af515181d 100644
+--- a/platform/port_events.cpp
++++ b/platform/port_events.cpp
+@@ -343,6 +343,11 @@ void PortRearmPad0() {
+ // MP1's frame pacing (src/MetroidPrime/main.cpp there), called once per main-loop iteration: under
+ // the 60 FPS cap, sleeps to the next 60 Hz deadline. A frame that overran by more than a period
+ // resets the deadline instead of racing to catch up.
++// mp2-nx (build 4): the game thread's time asleep in the frame pacing (this and DolphinCGraphics.cpp's
++// PaceFrame), cumulative: the map's frame-budget readout takes it as the frame's spare time.
++extern "C" {
++unsigned long long mp2nx_pace_sleep_ns = 0;
++}
+ void PortPaceFrame() {
+   // The iteration's work ends here, before any sleep; its start is where the last call returned.
+   static uint64_t sWorkStartNs = 0;
+@@ -366,6 +371,10 @@ void PortPaceFrame() {
+   sNextFrameDeadline += kFramePeriodNs;
+   const uint64_t now = SDL_GetTicksNS();
+   if (sNextFrameDeadline > now) {
++    struct SleepTimer {
++      uint64_t t0 = SDL_GetTicksNS();
++      ~SleepTimer() { mp2nx_pace_sleep_ns += SDL_GetTicksNS() - t0; }
++    } sleepTimer;
+     // SDL_DelayPrecise sleeps in 1 ms slices, about sixteen wake-ups a frame at 60 Hz. One plain
+     // sleep up to 2 ms short of the deadline first leaves it only the last stretch, which saves the
+     // wake-ups (and battery on phones).
 diff --git a/platform/port_harness.cpp b/platform/port_harness.cpp
 index 502c3304b..ea42482d8 100644
 --- a/platform/port_harness.cpp
@@ -476,6 +503,27 @@ index f4ff077ce..298a34ddb 100644
    VirtualFree(m_base, 0, MEM_RELEASE);
  #else
    munmap(m_base, m_size);
+diff --git a/src/Kyoto/Graphics/DolphinCGraphics.cpp b/src/Kyoto/Graphics/DolphinCGraphics.cpp
+index d215345cf..faf494b43 100644
+--- a/src/Kyoto/Graphics/DolphinCGraphics.cpp
++++ b/src/Kyoto/Graphics/DolphinCGraphics.cpp
+@@ -54,6 +54,7 @@ int CopyTexelBytes(GXTexFmt fmt) {
+ }
+ 
+ // periodUs: the video rate under the 60 FPS cap, else 1/FpsCap (MP1's FPS cap slider, f1b).
++extern "C" unsigned long long mp2nx_pace_sleep_ns;  // platform/port_events.cpp (mp2-nx, build 4)
+ void PaceFrame(long periodUs) {
+   using clock = std::chrono::steady_clock;
+   static clock::time_point sDeadline = clock::now();
+@@ -62,6 +63,8 @@ void PaceFrame(long periodUs) {
+   sDeadline += period;
+   if (sDeadline > now) {
+     std::this_thread::sleep_until(sDeadline);
++    mp2nx_pace_sleep_ns += static_cast< unsigned long long >(
++        std::chrono::duration_cast< std::chrono::nanoseconds >(clock::now() - now).count());
+   } else if (now - sDeadline > period) {
+     // Too far behind (a load stall): resync rather than run fast to catch up.
+     sDeadline = now;
 diff --git a/src/MetroidPrime/CMFGameLoader.cpp b/src/MetroidPrime/CMFGameLoader.cpp
 index 468523c04..29ccf33a4 100644
 --- a/src/MetroidPrime/CMFGameLoader.cpp
@@ -511,7 +559,7 @@ index 468523c04..29ccf33a4 100644
    gResFactoryUnknown = 2;
  }
 diff --git a/src/MetroidPrime/CMapArea.cpp b/src/MetroidPrime/CMapArea.cpp
-index 3d4fe910a..d41a12d79 100644
+index 3d4fe910a..0e1010b38 100644
 --- a/src/MetroidPrime/CMapArea.cpp
 +++ b/src/MetroidPrime/CMapArea.cpp
 @@ -15,6 +15,7 @@
@@ -638,9 +686,9 @@ index 3d4fe910a..d41a12d79 100644
 +}
 +}  // namespace
 +
-+// The map diagnostics build: with the map open, the two paths take turns every 6 s (an A/B in one sitting,
-+// nothing to change between runs); each switch is logged on stderr, next to Aurora's "frame:" lines.
-+// MP2_NATIVE_MAP=0 or 1 (deko3d_env.txt) pins one path instead.
++// The map's path. Build 3 measured the GPU path at 60 fps where GX ran at 24 (2026-11-09), so from build 4 it is
++// the only one by default. MP2_NATIVE_MAP (deko3d_env.txt): 0 the GX path, ab the two taking turns every 6 s
++// (an A/B in one sitting, each switch logged on stderr), anything else or unset the GPU path.
 +namespace {
 +int gPinned = -2;            // -2 unread, -1 alternate, 0 GX, 1 native
 +bool gAbNative = true;
@@ -651,10 +699,10 @@ index 3d4fe910a..d41a12d79 100644
 +bool CMapArea::NativeMapEnabled() {
 +  if (gPinned == -2) {
 +    const char* e = std::getenv("MP2_NATIVE_MAP");
-+    gPinned = e == nullptr || *e == '\0' ? -1 : (*e == '0' ? 0 : 1);
++    gPinned = e != nullptr && e[0] == 'a' && e[1] == 'b' ? -1 : (e != nullptr && *e == '0' ? 0 : 1);
 +    std::fprintf(stderr, "map: %s\n",
-+                 gPinned < 0 ? "the native and GX map paths alternate every 6 s while the map is open"
-+                             : (gPinned ? "the native map path (MP2_NATIVE_MAP=1)" : "the GX map path (MP2_NATIVE_MAP=0)"));
++                 gPinned < 0 ? "the GPU and GX map paths alternate every 6 s while the map is open (MP2_NATIVE_MAP=ab)"
++                             : (gPinned ? "the GPU map path" : "the GX map path (MP2_NATIVE_MAP=0)"));
 +  }
 +  if (gPinned >= 0) {
 +    return gPinned == 1;
@@ -944,7 +992,7 @@ index 3d4fe910a..d41a12d79 100644
 +  if (gStatsWindow == 0) {
 +    gStatsWindow = now;
 +  }
-+  if (now - gStatsWindow < 3000000000ull || gStats.frames == 0) {
++  if (now - gStatsWindow < 10000000000ull || gStats.frames == 0) {
 +    return;
 +  }
 +  const double n = double(gStats.frames);

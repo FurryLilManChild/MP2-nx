@@ -2,6 +2,21 @@
 
 Newest first.
 
+## 2026-11-09: the GPU map path by default, a frame-budget readout (build 4)
+
+- The GPU map path is the only one by default; MP2_NATIVE_MAP=0 gives the GX path, MP2_NATIVE_MAP=ab the 6 s A/B.
+- A readout at the bottom left while the map is open (switch_menu.cpp), over half-second windows, per frame:
+  - game: the game thread's work, the frame less its sleep in the frame pacing (mp2nx_pace_sleep_ns, both
+    pacers: PortPaceFrame and DolphinCGraphics.cpp's PaceFrame);
+  - render: Aurora's render worker busy time less its wait for a swapchain image (dkQueueAcquireImage);
+  - GPU: the GPU's busy time, from timestamp reports bracketing each command list the frame submits, in the
+    query block memory.cpp had set aside unused (summed once the frame's fence has signalled; gaps between
+    lists left out). Not measured on Vulkan.
+  - Green under 14 ms, yellow under 16.7, red over; "worst" is the largest of the three since the map opened.
+    Logged every 5 s while the map is open ("map budget").
+- Every change of the map's alpha state (dst alpha, blend) is logged, up to 40 times, to see when the constant
+  dst alpha of build 2's run happens and which way it is drawn.
+
 ## 2026-11-09: build 3 result: the map at 60 fps
 
 The owner's test (deko3d, stock clocks, the same heavy zoomed-out map view, A/B every 6 s): NATIVE (GPU) ran a steady

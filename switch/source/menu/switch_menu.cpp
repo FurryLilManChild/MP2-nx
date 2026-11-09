@@ -56,6 +56,12 @@ extern "C" const char* mp2nx_log_status(void);  // startup.cpp
 extern "C" bool mp2nx_logs_ok(void);
 // CMapArea.cpp (the map A/B build): true while the map is open, with the path in use and the map's draw time
 extern "C" bool mp2nx_map_ab_state(int* native, float* drawMs) __attribute__((weak));
+// the map's frame-budget readout (build 4): cumulative times from the deko3d device (switch/deko/mpl/device.cpp),
+// Aurora's render worker (gfx/render_worker.cpp) and the game thread's frame pacing (platform/port_events.cpp)
+extern "C" void mp2nx_dk_gpu_times(uint64_t* gpuBusyNs, uint64_t* gpuFrames, uint64_t* acquireNs)
+    __attribute__((weak));
+extern "C" void aurora_render_worker_times(uint64_t* busyNs, uint64_t* gameWaitNs);
+extern "C" unsigned long long mp2nx_pace_sleep_ns;
 #endif
 
 namespace PortDebug::SwitchMenu {
@@ -942,19 +948,115 @@ void DrawAlways() {
     dl->AddText(font, small, pos, Col(0.4f, 1, 1), test);
   }
 #endif
-  // the map A/B build: which map path is drawing, live, so a test shows the switch without a log
+#if MP2NX_DEKO3D
+  // The map's frame budget (build 4), live while the map is open: per frame, over half-second windows, the game
+  // thread's work (the frame less its pacing sleep), the render worker's (less its wait for a swapchain image)
+  // and the GPU's busy time, against the 16.7 ms a 60 fps frame has. Logged every 5 s with the worst window.
   if (mp2nx_map_ab_state != nullptr) {
+    struct Budget {
+      uint64_t t = 0, frames = 0, sleep = 0, busy = 0, acquire = 0, gpu = 0, gpuFrames = 0;
+    };
+    static Budget sLast;
+    static uint64_t sFrames = 0;
+    static float sGame = 0.f, sRender = 0.f, sGpu = -1.f, sFpsWin = 0.f, sWorst = 0.f;
+    static double sLogGame = 0, sLogRender = 0, sLogGpu = 0, sLogFps = 0, sLogDraw = 0, sLogWorst = 0;
+    static int sLogWindows = 0, sLogGpuWindows = 0;
+    static uint64_t sLogAt = 0, sOpenSeen = 0;
+    sFrames++;
     int native = 0;
     float drawMs = 0.f;
-    if (mp2nx_map_ab_state(&native, &drawMs)) {
-      char buf[96];
-      std::snprintf(buf, sizeof(buf), "Map test: %s path, %.0f fps, map draw %.1f ms", native ? "NATIVE" : "OLD (GX)",
-                    static_cast< double >(sFps), static_cast< double >(drawMs));
-      const ImVec2 pos(display.y * 0.02f, display.y - display.y * 0.02f - small);
-      dl->AddText(font, small, ImVec2(pos.x + 2, pos.y + 2), Col(0, 0, 0, 0.9f), buf);
-      dl->AddText(font, small, pos, native ? Col(0.4f, 1, 0.4f) : Col(1, 0.6f, 0.3f), buf);
+    const bool mapOpen = mp2nx_map_ab_state(&native, &drawMs);
+    const uint64_t tNs = armTicksToNs(armGetSystemTick());
+    auto sample = [&]() {
+      Budget b;
+      b.t = tNs;
+      b.frames = sFrames;
+      b.sleep = mp2nx_pace_sleep_ns;
+      aurora_render_worker_times(&b.busy, nullptr);
+      if (mp2nx_dk_gpu_times != nullptr && mp2nx_dk_active()) {
+        mp2nx_dk_gpu_times(&b.gpu, &b.gpuFrames, &b.acquire);
+      }
+      return b;
+    };
+    if (!mapOpen) {
+      sLast = Budget{};
+      if (sLogWindows > 0 && sLogAt != 0) {
+        sLogAt = 0;  // the next open starts a new log window
+      }
+    } else {
+      if (sOpenSeen == 0 || sLast.t == 0) {
+        sWorst = 0.f;
+        sGpu = -1.f;
+        sFpsWin = 0.f;
+      }
+      sOpenSeen = tNs;
+      if (sLast.t == 0) {
+        sLast = sample();
+        sLogAt = tNs;
+        sLogGame = sLogRender = sLogGpu = sLogFps = sLogDraw = sLogWorst = 0;
+        sLogWindows = sLogGpuWindows = 0;
+      } else if (tNs - sLast.t >= 500000000ull && sFrames > sLast.frames) {
+        const Budget b = sample();
+        const double n = double(b.frames - sLast.frames);
+        const double wall = double(b.t - sLast.t);
+        sFpsWin = float(n * 1e9 / wall);
+        sGame = float((wall - double(b.sleep - sLast.sleep)) / n / 1e6);
+        sRender = float(double((b.busy - sLast.busy) - (b.acquire - sLast.acquire)) / n / 1e6);
+        sGpu = b.gpuFrames > sLast.gpuFrames ? float(double(b.gpu - sLast.gpu) / double(b.gpuFrames - sLast.gpuFrames) / 1e6)
+                                             : -1.f;
+        const float worstNow = std::max({sGame, sRender, sGpu});
+        sWorst = std::max(sWorst, worstNow);
+        sLogGame += sGame;
+        sLogRender += sRender;
+        sLogFps += sFpsWin;
+        sLogDraw += drawMs;
+        sLogWorst = std::max(sLogWorst, double(worstNow));
+        if (sGpu >= 0.f) {
+          sLogGpu += sGpu;
+          sLogGpuWindows++;
+        }
+        sLogWindows++;
+        sLast = b;
+        if (tNs - sLogAt >= 5000000000ull && sLogWindows > 0) {
+          const double w = sLogWindows;
+          char gpuLog[40];
+          if (sLogGpuWindows > 0) {
+            std::snprintf(gpuLog, sizeof(gpuLog), "%.2f ms", sLogGpu / sLogGpuWindows);
+          } else {
+            std::snprintf(gpuLog, sizeof(gpuLog), "not measured (Vulkan)");
+          }
+          std::fprintf(stderr,
+                       "map budget (%d half-second windows, %s path): %.1f fps; per frame, of the 16.7 ms a 60 fps frame "
+                       "has: game thread %.2f ms, render worker %.2f ms, GPU %s; the map's draw %.2f ms; the busiest "
+                       "window's largest %.2f ms\n",
+                       sLogWindows, native ? "GPU" : "GX", sLogFps / w, sLogGame / w, sLogRender / w,
+                       gpuLog,
+                       sLogDraw / w, sLogWorst);
+          sLogAt = tNs;
+          sLogGame = sLogRender = sLogGpu = sLogFps = sLogDraw = sLogWorst = 0;
+          sLogWindows = sLogGpuWindows = 0;
+        }
+      }
+      if (sFpsWin > 0.f) {
+        char buf[160];
+        char gpu[24];
+        if (sGpu >= 0.f) {
+          std::snprintf(gpu, sizeof(gpu), "%.1f", static_cast< double >(sGpu));
+        } else {
+          std::snprintf(gpu, sizeof(gpu), "n/a");
+        }
+        std::snprintf(buf, sizeof(buf), "Map%s: %.0f fps | game %.1f | render %.1f | GPU %s | of 16.7 ms (worst %.1f)",
+                      native ? "" : " (GX)", static_cast< double >(sFpsWin), static_cast< double >(sGame),
+                      static_cast< double >(sRender), gpu, static_cast< double >(sWorst));
+        const float worst = std::max({sGame, sRender, sGpu});
+        const ImU32 col = worst < 14.f ? Col(0.4f, 1, 0.4f) : (worst < 16.7f ? Col(1, 0.9f, 0.3f) : Col(1, 0.4f, 0.4f));
+        const ImVec2 pos(display.y * 0.02f, display.y - display.y * 0.02f - small);
+        dl->AddText(font, small, ImVec2(pos.x + 2, pos.y + 2), Col(0, 0, 0, 0.9f), buf);
+        dl->AddText(font, small, pos, col, buf);
+      }
     }
   }
+#endif
   if (!sToast.empty() && now < sToastUntil) {
     const float w = TextWidth(font, small, sToast);
     const ImVec2 pos((display.x - w) * 0.5f, display.y * 0.88f);
