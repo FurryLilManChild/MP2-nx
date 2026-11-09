@@ -10,7 +10,8 @@ Every flush took the GPU path: no refusals, no CPU fallback, about 7,800 fill tr
 one draw. Map draw on the game thread 4.1 to 5.0 ms (queueing about 2.0 ms, the hand-off 1.0 to 1.5 ms) against
 40.7 ms in build 2. Two map pipelines were made (the first in 360 ms, the hitch on first open), both alpha mode 0:
 this view never set a constant dst alpha, so the dst-alpha cases are compiled and checked offline but not yet
-seen on hardware. Build 2's refusal happened on another view; the owner saw no wrong drawing on either.
+seen on hardware. Build 2 saw a constant dst alpha on every flush and build 3 none: why the state differed
+between the two runs (where the map was opened from, what drew before it) is not known yet.
 Headroom is not measured yet: the vsync wait hides it. Estimate from build 2's numbers: about 14 of 16.7 ms on
 the game thread.
 
