@@ -10,6 +10,13 @@ Newest first.
 - Test-only switches removed: deko3d_env.txt is no longer read (every MP2DK_* setting at its default, which also
   ends the test cycle and its screenshots), the left stick click frame capture, and the cycle label.
 - README.md written for players and builders.
+- History rewritten with git filter-repo (every blob and message: the owner's name, his PC layout and hardware),
+  force pushed with his consent; HEAD's tree checked against the pre-rewrite tree (only those words differ).
+  The repo's visibility could not be changed from this session (the proxy refuses settings writes): the owner
+  flips it on GitHub.
+- Release candidate: build 10 (commit 265af38), NRO sha256 20669bd5..., zip mp2-nx-v0.5.0-switch.zip sha256
+  74f63f0f... (the NRO, README.txt, the disc note, LICENSE-mp2-nx.txt and the three licenses from 0.1.0).
+  Checks before publishing: a Vulkan start, and a start with an empty cache folder.
 
 ## 2026-11-09: v0.5.0 cleanup, deko3d the default
 
