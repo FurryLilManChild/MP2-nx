@@ -2,6 +2,15 @@
 
 Newest first.
 
+## 2026-11-09: v0.5.0 goes public
+
+- The owner's decisions: a public release, the precompiled shader lists stay in the NRO (they hold no game assets),
+  the repo goes public with an MIT license for its own code (LICENSE lists the files under other licenses; the
+  MPL-2.0 files' source is here), and his name and PC layout are scrubbed from the whole history first.
+- Test-only switches removed: deko3d_env.txt is no longer read (every MP2DK_* setting at its default, which also
+  ends the test cycle and its screenshots), the left stick click frame capture, and the cycle label.
+- README.md written for players and builders.
+
 ## 2026-11-09: v0.5.0 cleanup, deko3d the default
 
 - The owner: v0.5.0 is the next release. One track: the NRO and SD folder are "mp2-nx" again (the deko3d test

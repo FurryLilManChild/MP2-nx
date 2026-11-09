@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..3317658ab 100644
+index ef1c8c60d..a44e99903 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -179,7 +179,7 @@ index 2b05502ac..c9b72c552 100644
    if (!open) {
      sVisible = false;
 diff --git a/platform/input/port_input_devices.cpp b/platform/input/port_input_devices.cpp
-index cc7e6a6b8..9e5e76777 100644
+index cc7e6a6b8..d8dc3ffe9 100644
 --- a/platform/input/port_input_devices.cpp
 +++ b/platform/input/port_input_devices.cpp
 @@ -43,6 +43,11 @@
@@ -378,7 +378,7 @@ index 3cbd20668..af515181d 100644
      // sleep up to 2 ms short of the deadline first leaves it only the last stretch, which saves the
      // wake-ups (and battery on phones).
 diff --git a/platform/port_harness.cpp b/platform/port_harness.cpp
-index 502c3304b..ea42482d8 100644
+index 502c3304b..78d36d55d 100644
 --- a/platform/port_harness.cpp
 +++ b/platform/port_harness.cpp
 @@ -6,6 +6,8 @@
@@ -1159,7 +1159,7 @@ index de0044446..2a49a83db 100644
    // Skip ride: the load is done once the loader asks the text to fade (StartTextFadeOut).
    if (mPortSkipRide && mStopSoon) {
 diff --git a/src/MetroidPrime/Player/CPlayerGun.cpp b/src/MetroidPrime/Player/CPlayerGun.cpp
-index ea43be9af..ce8f6b2a9 100644
+index ea43be9af..3d3d30f34 100644
 --- a/src/MetroidPrime/Player/CPlayerGun.cpp
 +++ b/src/MetroidPrime/Player/CPlayerGun.cpp
 @@ -70,6 +70,7 @@

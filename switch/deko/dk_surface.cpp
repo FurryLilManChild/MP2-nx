@@ -214,20 +214,8 @@ bool choose() {
     write_boot_count(failed + 1);
     g_on = true;
     log("renderer: deko3d (the default); Aurora's device is Dawn's Null device");
-    // mp2-nx (deko-11): <app folder>/deko3d_env.txt, NAME=VALUE lines set before Aurora reads them (for A/B
-    // tests without a new build, e.g. AURORA_DUAL_SOURCE=0)
-    if (FILE* env = fopen(MP2NX_APP_DIR "/deko3d_env.txt", "r")) {
-        char line[256];
-        while (fgets(line, sizeof line, env)) {
-            line[strcspn(line, "\r\n")] = 0;
-            char* eq = strchr(line, '=');
-            if (line[0] == '#' || !eq || eq == line) continue;
-            *eq = 0;
-            setenv(line, eq + 1, 1);
-            log("deko3d_env.txt: %s=%s", line, eq + 1);
-        }
-        fclose(env);
-    }
+    // (v0.5.0: deko3d_env.txt, the test builds' A/B settings file, is no longer read; every MP2DK_* setting is at
+    // its default)
     return true;
 }
 

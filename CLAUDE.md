@@ -25,3 +25,4 @@ emoji. Do not start cloud build or test runs without asking him first.
 - Log each session in `docs/progress-log.md` (newest first) with evidence: what broke, the cause, the fix.
 - Commit as `FurryLilManChild <346934328+FurryLilManChild@users.noreply.github.com>`.
 
+The owner's PC folder layout lives in Claude's project memory, not in this public repo.
