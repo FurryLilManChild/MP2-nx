@@ -19,6 +19,10 @@ Newest first.
   stick") true; before this it was not. The D-pad alone still picks visors: the chord (rank 1,
   two inputs) claims the D-pad press while L is held.
 - The Twin stick aiming row's note now lists the beam directions.
+- Build 6 result (the owner, on hardware, after getting the Dark Beam): L + D-pad works, but right picks
+  Dark and left picks Light, the reverse of the code reading (left -> BeamIce -> RequestBeam(1),
+  kBI_Dark). Cause not found yet. Plan: keep his observed layout, correct the menu note in the next
+  build, and find the swap before changing the mapping.
 
 ## 2026-11-09: the GPU map path by default, a frame-budget readout (build 4)
 
