@@ -9,7 +9,7 @@ Newest first.
   and twin stick aims with that same stick, so a hard turn would swap to any owned beam. Not seen yet
   because only the Power Beam is owned so far.
 - Echoes Unbound's twin-stick beam shift (BindBeamChords: hold LB, D-pad up Power, left Dark, right
-  Light, down Annihilator, the C-stick's directions) was gated on PortTouch::TwinStick(), the touch
+  Light, down Annihilator, MP1's directions) was gated on PortTouch::TwinStick(), the touch
   overlay's layout, which is off on the Switch, and its pad shift also needed touch controls off.
 - Fix: BindBeamChords also runs when PortMouse::StickEnabled() (the Switch menu's "Twin stick
   aiming"), adding the pad's L shift then (still skipped if a remap puts another button on L; the
@@ -19,10 +19,10 @@ Newest first.
   stick") true; before this it was not. The D-pad alone still picks visors: the chord (rank 1,
   two inputs) claims the D-pad press while L is held.
 - The Twin stick aiming row's note now lists the beam directions.
-- Build 6 result (the owner, on hardware, after getting the Dark Beam): L + D-pad works, but right picks
-  Dark and left picks Light, the reverse of the code reading (left -> BeamIce -> RequestBeam(1),
-  kBI_Dark). Cause not found yet. Plan: keep his observed layout, correct the menu note in the next
-  build, and find the swap before changing the mapping.
+- Build 6 result (the owner, on hardware, after getting the Dark Beam): L + D-pad works and matches the
+  code (left picks Dark), but MP2's layout is Dark on the right and Light on the left. (I first
+  misread his report as the reverse.) Build 7 swaps left and right in BindBeamChords' kBeams and in
+  the menu note: up Power, right Dark, left Light, down Annihilator.
 
 ## 2026-11-09: the GPU map path by default, a frame-budget readout (build 4)
 

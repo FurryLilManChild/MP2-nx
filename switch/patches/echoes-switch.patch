@@ -179,7 +179,7 @@ index 2b05502ac..c9b72c552 100644
    if (!open) {
      sVisible = false;
 diff --git a/platform/input/port_input_devices.cpp b/platform/input/port_input_devices.cpp
-index cc7e6a6b8..27a185439 100644
+index cc7e6a6b8..9e5e76777 100644
 --- a/platform/input/port_input_devices.cpp
 +++ b/platform/input/port_input_devices.cpp
 @@ -43,6 +43,11 @@
@@ -229,7 +229,7 @@ index cc7e6a6b8..27a185439 100644
    std::vector<Input> keyShifts;
    std::vector<Input> padShifts;
    bool lshiftTaken = false;
-@@ -344,8 +367,8 @@ void BindBeamChords(Profile& p) {
+@@ -344,15 +367,17 @@ void BindBeamChords(Profile& p) {
        lshiftTaken = true;
      }
    }
@@ -240,7 +240,17 @@ index cc7e6a6b8..27a185439 100644
      padShifts.push_back(NativeInput(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER));
    }
  
-@@ -1475,6 +1498,16 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
+   // The engine's beam actions are MP1's names for MP2's slots, in the order RouteDirectActions
+   // requests them: Power, Ice (Dark), Wave (Light), Plasma (Annihilator).
+   static constexpr Action kDirs[4] = {Action::PadUp, Action::PadDown, Action::PadLeft, Action::PadRight};
+-  static constexpr Action kBeams[4] = {Action::BeamPower, Action::BeamPlasma, Action::BeamIce, Action::BeamWave};
++  // mp2-nx (the owner, build 6 on hardware): MP2's own layout is Dark on the right and Light on the left
++  // (MP1's chord had them the other way), so left is Wave (Light) and right is Ice (Dark).
++  static constexpr Action kBeams[4] = {Action::BeamPower, Action::BeamPlasma, Action::BeamWave, Action::BeamIce};
+   const std::vector<Binding> base = p.bindings;
+   const uint16_t noBall = static_cast<uint16_t>(PortInput::kCtxAll & ~PortInput::kCtxMorphBall);
+   for (int d = 0; d < 4; ++d) {
+@@ -1475,6 +1500,16 @@ bool ReadGyroRates(float& pitch, float& yaw, float dt) {
      }
    }
  
