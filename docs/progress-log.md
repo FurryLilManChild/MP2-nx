@@ -17,6 +17,13 @@ Src1Alpha by to_blend_state. The draw sets the blend constant (dst alpha / 255).
 the source-alpha case still falls back to the CPU. New log lines give each flush state's dst alpha, blend mode
 and factors, and each pipeline's blend and alpha mode.
 
+Checked offline before the Switch test: a host (x86) build of the same Tint, with the bridge's own
+shader_translate.cpp (BindingScheme::Sequential, as dk_pipelines.cpp uses for non-GX shaders), took all three
+map shader variants, vertex and fragment, to GLSL, and the host uam 1.1.0 compiled every one to DKSH. The
+dual-source variant writes layout(location = 0, index = 0/1); the uniform block lands on UBO 0. The map's EFB
+pass has one colour target (GX pipelines are built with one), as dual-source blending needs, and the bridge
+maps the Src1 blend factors and SetBlendConstant to deko3d.
+
 ## 2026-11-08: the map on the GPU (build 2)
 
 - Build 1's A/B log (busy zoomed-out map, deko3d, stock clocks), the logs correct this time (build 1 stamp, every
