@@ -6,7 +6,7 @@
 #define MP2NX_APP_NAME "mp2-nx"
 #endif
 #ifndef MP2NX_VERSION
-#define MP2NX_VERSION "0.5.0" // (CMake passes MP2NX_VERSION from switch/cmake/mp2_switch_deps.cmake)
+#define MP2NX_VERSION "0.5.1" // (CMake passes MP2NX_VERSION from switch/cmake/mp2_switch_deps.cmake)
 #endif
 #define MP2NX_APP_DIR "sdmc:/switch/" MP2NX_APP_NAME
 // The release's folder: a build under another name without a disc of its own reads the disc from there.

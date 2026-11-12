@@ -75,6 +75,9 @@ uint64_t g_compilerId = 0;
 uint64_t g_compiled = 0, g_failed = 0, g_compileNs = 0, g_compileMaxNs = 0, g_pending = 0;
 std::atomic<uint64_t> g_loaded{0}, g_loadsSession{0}, g_skipped{0};
 int g_failDumps = 0;
+// mp2-nx (0.5.1): the job uam is on now, for the watchdog's stall report (mp2nx_shader_state)
+std::atomic<uint64_t> g_curStartNs{0}, g_curHash{0};
+std::atomic<int> g_curStage{0};
 
 // ---- the load budget (render worker)
 uint32_t g_budget = 64;
@@ -155,6 +158,11 @@ void* worker_main(void*) {
     host_alloc_thread();
 
     svcSetThreadPriority(CUR_THREAD_HANDLE, kMaxThreadPriority);
+    // mp2-nx (0.5.1, issue #3): any of the game's three cores, not only the one it was started on. At this low
+    // priority it runs only when a core has nothing else to do; pinned to core 0 under a busy game thread, a 0.5 s
+    // compile took 2 to 3 s and one 22 s (the HUD missing in the Dark Samus fight while 203 pipelines compiled).
+    const Result maskRc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 1, 0b111);
+    dklog("shaders: uam worker on cores 0-2 (idle time on any of them): %s", R_SUCCEEDED(maskRc) ? "ok" : "refused");
     const uint64_t t0 = now_ns();
     uam::init(true);
     static const char kTest[] = "#version 460\nvoid main() { gl_Position = vec4(0.0, 0.0, 0.0, 1.0); }\n";
@@ -180,9 +188,13 @@ void* worker_main(void*) {
             fclose(f);
         }
         const uint64_t c0 = now_ns();
+        g_curHash.store(e->glslHash, std::memory_order_relaxed);
+        g_curStage.store(stage_index(e->stage), std::memory_order_relaxed);
+        g_curStartNs.store(c0, std::memory_order_release);
         uam::Result res = uam::compile(e->stage == ShaderStage::Vertex ? uam::Stage::Vertex : uam::Stage::Fragment,
                                        job.glsl.c_str());
         const uint64_t ns = now_ns() - c0;
+        g_curStartNs.store(0, std::memory_order_release);
         // mp2-nx (deko-5: heap corruption whenever the scan visor's shaders compile): every GLSL compiled
         // here is kept in cache/glsl/, to run through uam on a PC with a memory checker
         {
@@ -412,3 +424,28 @@ int shaders_report(char* out, size_t size) {
 
 // the harness's perf window (native/src/pc/runtime/pc_frame.cpp via cos_switch_shader_cache_report)
 extern "C" int aurora_switch_dk_shaders_report(char* out, size_t size) { return swdk::shaders_report(out, size); }
+
+// mp2-nx (0.5.1, issue #3's 20 s freeze): the uam worker's state in one line, for the watchdog
+extern "C" void mp2nx_shader_state(char* out, size_t size) {
+    using namespace swdk;
+    const uint64_t start = g_curStartNs.load(std::memory_order_acquire);
+    size_t fg = 0, bg = 0;
+    uint64_t pending = 0;
+    {
+        std::unique_lock<std::mutex> lock(g_jobMutex, std::try_to_lock);
+        if (lock.owns_lock()) {
+            fg = g_foreground.size();
+            bg = g_background.size();
+            pending = g_pending;
+        }
+    }
+    if (start != 0) {
+        snprintf(out, size, "uam worker: compiling %s shader %016llx for %.0f ms; %zu foreground and %zu background "
+                 "waiting (%llu pending)", g_curStage.load() == 0 ? "vertex" : "fragment",
+                 (unsigned long long)g_curHash.load(), double(now_ns() - start) / 1e6, fg, bg,
+                 (unsigned long long)pending);
+    } else {
+        snprintf(out, size, "uam worker: idle; %zu foreground and %zu background waiting (%llu pending)", fg, bg,
+                 (unsigned long long)pending);
+    }
+}

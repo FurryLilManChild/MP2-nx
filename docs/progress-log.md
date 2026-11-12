@@ -2,6 +2,35 @@
 
 Newest first.
 
+## 2026-11-11: 0.5.1: GitHub issues #3 (HUD gone against Dark Samus) and #4 (quiet sound)
+
+- Issue #3 (LFranco1213; the owner saw it too): in the first Dark Samus fight's second phase the HUD, the arm
+  cannon and other screen elements vanish until she hits again. The reporter's logs (build 10, deko3d): in that
+  room (Agon Wastes area 46, 10_sand_alamostorage) "MP2 pipeline context 42b935e40000002e left: 515275 skipped
+  draws, 203 new"; compiles took 0.5 to 3 s each, one 22.6 s, and a 20 s freeze ("no frame for 20.0 s"; main
+  thread in begin_frame, render thread after present). The deko3d bridge skipped nothing there (its count is
+  unchanged from boot): Aurora skipped the draws whose pipelines were still compiling. Theory, not proven (the log
+  does not say which draws): the phase brings new HUD and cannon states. The starter covers only the front end and
+  Temple Grounds (0 of the room's 334 compiled hashes in it).
+- Cause of the slow compiles (code reading): uam runs on one worker at priority 0x3B (lowest) with the core of the
+  thread that created it, so it compiled in the idle time of a busy core; the compile thread waits for it per
+  stage.
+- 0.5.1: (1) the uam worker may run on cores 0-2 (svcSetThreadCoreMask 1, 0b111), idle time on any of them;
+  (2) the boot helper compile threads also work during play while 8 or more pipelines wait (deko3d), until the
+  queue is empty; (3) "[skips]" lines every 2 s while draws are skipped: the count, and per pipeline the skipped
+  draws and where in its pass they sit (the HUD and cannon are drawn at the end of the EFB pass); (4) for the
+  freeze: begin_frame's two waits get their own phase names, and the watchdog's stall report adds the uam
+  worker's state (the job, how long, the queues); (5) the starter files take the owner's SD cache (21 recipes,
+  26 DKSH records; tools/merge_dksh.py merges DKSH cache files). The deko test builds' cache, from his own Dark
+  Samus fight, may still be on his SD card.
+- Issue #4 (himyars-beep): the sound is quiet with every volume at maximum. switch/source/platform/audio_boost.cpp
+  wraps SDL_OpenAudioDeviceStream and SDL_DestroyAudioStream: every stream (MusyX's and the AI DMA path's) gets
+  the boost as its SDL gain. Switch menu Game page, "Volume boost", 100 to 300% in 25% steps, default 200%,
+  live, saved as volume_boost in switch_menu.cfg. SDL clips at the device conversion, so very high values can
+  distort loud moments.
+- Also in the reporter's logs: a crash.txt with no date, in _malloc_r on the compile thread
+  (aurora::gx::create_pipeline, fmt::format): heap corruption from somewhere else; its run cannot be told.
+
 ## 2026-11-09: v0.5.0 goes public
 
 - The owner's decisions: a public release, the precompiled shader lists stay in the NRO (they hold no game assets),

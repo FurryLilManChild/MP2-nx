@@ -60,7 +60,7 @@ endif()
 # The app's name: the NRO, its title and its SD folder (switch/include/mp2nx_app.h). "mp2-nx", the one release
 # track since v0.5.0 (the deko3d test builds were "mp2-nx-deko" before that).
 # The release version: the NRO's title info and the Switch menu's System page (MP2NX_VERSION, switch_menu.cpp).
-set(MP2NX_VERSION "0.5.0")
+set(MP2NX_VERSION "0.5.1")
 set(MP2NX_APP_NAME "mp2-nx" CACHE STRING "the NRO and SD folder name (sdmc:/switch/<name>/)")
 # (set only on the targets that use it, so a name change rebuilds those and not the whole game)
 set(_mp2nx_disc "${MP2NX_ROOT}/switch/source/disc")

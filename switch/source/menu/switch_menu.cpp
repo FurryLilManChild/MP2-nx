@@ -35,6 +35,8 @@
 #include <vector>
 
 extern "C" void mp2nx_load_boost(int reason, int on);
+// switch/source/platform/audio_boost.cpp (0.5.1, issue #4)
+extern "C" void mp2nx_set_volume_boost(int percent);
 extern "C" void mp2nx_start_log_flusher(void);
 #if MP2NX_DEKO3D
 // switch/deko/dk_surface.cpp: the renderer of this start and the choice for the next
@@ -69,6 +71,7 @@ float sHandheldScale = 0.f;
 float sDockedScale = 0.f;
 bool sShowFps = false;
 bool sMapBudget = false;  // the map's frame-budget readout (build 4), off for normal play
+int sVolumeBoost = 200;   // 0.5.1 (issue #4): percent over the game's own level, every audio stream
 bool sMenuButtonsDefaulted = false; // the Switch default for Separate menu buttons was applied once
 bool sConfigLoaded = false;
 int sAppliedMode = -1; // AppletOperationMode the resolution was last applied for
@@ -91,6 +94,8 @@ void LoadConfig() {
       sShowFps = i != 0;
     } else if (std::sscanf(line, "map_budget=%d", &i) == 1) {
       sMapBudget = i != 0;
+    } else if (std::sscanf(line, "volume_boost=%d", &i) == 1) {
+      sVolumeBoost = std::clamp(i, 100, 300);
     } else if (std::sscanf(line, "menu_buttons_defaulted=%d", &i) == 1) {
       sMenuButtonsDefaulted = i != 0;
     }
@@ -104,8 +109,10 @@ void SaveConfig() {
     std::fprintf(stderr, "mp2-nx: menu: could not write %s\n", kConfigPath);
     return;
   }
-  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmap_budget=%d\nmenu_buttons_defaulted=%d\n",
-               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMapBudget ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0);
+  std::fprintf(f, "handheld_scale=%.2f\ndocked_scale=%.2f\nfps_counter=%d\nmap_budget=%d\nmenu_buttons_defaulted=%d\n"
+               "volume_boost=%d\n",
+               sHandheldScale, sDockedScale, sShowFps ? 1 : 0, sMapBudget ? 1 : 0, sMenuButtonsDefaulted ? 1 : 0,
+               sVolumeBoost);
   std::fclose(f);
 }
 
@@ -540,6 +547,19 @@ std::vector< Row > BuildRows(int page) {
                     "Ends every cutscene as it starts, even ones you have not seen yet",
                     [](int) { PortOverlay::SetSkipCinematics(!PortOverlay::SkipCinematics()); Changed(true); },
                     nullptr});
+    {
+      char v[16];
+      std::snprintf(v, sizeof(v), "%d%%", sVolumeBoost);
+      rows.push_back({"Volume boost", v, "Louder than the game's own level (100%). Very high values can distort",
+                      [](int d) {
+                        // left and right step by 25%; A steps up and wraps from 300% back to 100%
+                        sVolumeBoost = d == 0 && sVolumeBoost >= 300 ? 100
+                                                                      : std::clamp(sVolumeBoost + (d < 0 ? -25 : 25), 100, 300);
+                        mp2nx_set_volume_boost(sVolumeBoost);
+                        SaveConfig();
+                      },
+                      nullptr});
+    }
     rows.push_back({"Fast Morph", OnOff(sFastMorph), "Morph ball without the camera pulling back first",
                     [](int d) { Toggle(sFastMorph, d); }, nullptr});
     rows.push_back({"Spring Ball", OnOff(sSpringBall),
@@ -847,6 +867,7 @@ void DrawAlways() {
   }
   if (!sConfigLoaded) {
     LoadConfig();
+    mp2nx_set_volume_boost(sVolumeBoost);
     mp2nx_load_boost(0, 1); // load_boost.cpp: the title's startup warmup (cleared by CMFGameLoader)
     // mp2-nx (the boot-time build): the startup boost (FastLoad, set in startup.cpp) ends with the black
     // screen: FastLoad slows the GPU, and the title screen draws from here on

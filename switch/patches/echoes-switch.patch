@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index ef1c8c60d..a44e99903 100644
+index ef1c8c60d..fc99287b4 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -1031,7 +1031,9 @@ elseif(CMAKE_LINK_GROUP_USING_RESCAN_SUPPORTED OR CMAKE_CXX_LINK_GROUP_USING_RES
@@ -13,7 +13,7 @@ index ef1c8c60d..a44e99903 100644
      endif()
  elseif(APPLE)
      # ld64 searches every archive again until nothing new resolves, so the cycle needs no
-@@ -1105,3 +1107,74 @@ if(NOT ANDROID AND NOT IOS)
+@@ -1105,3 +1107,76 @@ if(NOT ANDROID AND NOT IOS)
              DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
      endif()
  endif()
@@ -37,7 +37,8 @@ index ef1c8c60d..a44e99903 100644
 +        ${MP2NX_ROOT}/switch/source/platform/load_boost.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/boot_screen.cpp
 +        ${MP2NX_ROOT}/switch/source/platform/misc_switch.cpp
-+        ${MP2NX_ROOT}/switch/source/platform/device_switch.cpp)
++        ${MP2NX_ROOT}/switch/source/platform/device_switch.cpp
++        ${MP2NX_ROOT}/switch/source/platform/audio_boost.cpp)
 +    target_sources(mp_port_audio PRIVATE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp)
 +    set_property(SOURCE ${MP2NX_ROOT}/switch/source/menu/switch_menu.cpp ${MP2NX_ROOT}/switch/source/platform/startup.cpp
 +        APPEND PROPERTY COMPILE_DEFINITIONS "MP2NX_APP_NAME=\"${MP2NX_APP_NAME}\"" "MP2NX_VERSION=\"${MP2NX_VERSION}\"")
@@ -45,7 +46,8 @@ index ef1c8c60d..a44e99903 100644
 +        INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/platform/debug_ui;${CMAKE_CURRENT_SOURCE_DIR}/platform/input")
 +    target_link_libraries(metroid_prime2_port PRIVATE sqlite3)
 +    target_link_options(metroid_prime2_port PRIVATE
-+        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename -Wl,--wrap=abort -Wl,--wrap=fchmod)
++        -Wl,--wrap=pthread_detach -Wl,--wrap=pthread_create -Wl,--wrap=rename -Wl,--wrap=abort -Wl,--wrap=fchmod
++        -Wl,--wrap=SDL_OpenAudioDeviceStream -Wl,--wrap=SDL_DestroyAudioStream)
 +    target_link_libraries(metroid_prime2_port PRIVATE mp2nx::vulkan)
 +    # deko3d phase 0: the toolchain and its smoke test (switch/cmake/mp2_deko3d.cmake)
 +    include(${MP2NX_ROOT}/switch/cmake/mp2_deko3d.cmake)
@@ -476,6 +478,32 @@ index 866538a59..7ae458a8c 100644
    sPressureModerateKb = moderateMib > 0 ? moderateMib * 1024 : 0;
    sPressureSevereKb = severeMib > 0 ? severeMib * 1024 : 0;
  #else
+diff --git a/platform/port_watchdog.cpp b/platform/port_watchdog.cpp
+index bf8976ee0..d82ee10ce 100644
+--- a/platform/port_watchdog.cpp
++++ b/platform/port_watchdog.cpp
+@@ -55,6 +55,9 @@ int64_t NowNs() { return aurora::phase::now_ns(); }
+ 
+ double Seconds(int64_t ns) { return static_cast< double >(ns) / 1e9; }
+ 
++// mp2-nx (0.5.1): the Switch layer's shader compiler state (switch/deko/mpl/shaders.cpp), if linked
++extern "C" [[gnu::weak]] void mp2nx_shader_state(char* out, size_t size);
++
+ void ReportStall(int level, int64_t stalledNs, unsigned frame) {
+   const int64_t now = NowNs();
+   const auto& main = aurora::phase::state(aurora::phase::Main);
+@@ -66,6 +69,11 @@ void ReportStall(int level, int64_t stalledNs, unsigned frame) {
+                  frame, main.name.load(std::memory_order_relaxed), ms(main));
+   LogLine("watchdog: render thread last in '%s' for %lld ms\n", render.name.load(std::memory_order_relaxed),
+                  ms(render));
++  if (mp2nx_shader_state != nullptr) {
++    char text[256];
++    mp2nx_shader_state(text, sizeof(text));
++    LogLine("watchdog: %s\n", text);
++  }
+   // The stack once at the start and once again at 30 s, to show whether it moved.
+   if (level == 0 || level == 2) {
+     if (!PortCrash::RequestStack(sMainThread.load(std::memory_order_relaxed))) {
 diff --git a/platform/rel.cpp b/platform/rel.cpp
 index f4ff077ce..298a34ddb 100644
 --- a/platform/rel.cpp

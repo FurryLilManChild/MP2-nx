@@ -296,20 +296,92 @@ index b1a0d8b9a..ab236243d 100644
  } // namespace aurora::device
 +#endif // !__SWITCH__
 diff --git a/lib/gfx/encoding.cpp b/lib/gfx/encoding.cpp
-index 28f8828b1..c1395fe70 100644
+index 28f8828b1..c391447b8 100644
 --- a/lib/gfx/encoding.cpp
 +++ b/lib/gfx/encoding.cpp
-@@ -20,6 +20,9 @@
+@@ -20,6 +20,10 @@
  #include "../webgpu/gpu_prof.hpp"
  
  #include <algorithm>
++#include <chrono>
 +#include <cmath>
 +#include <cstdio>
 +#include <mutex>
  #include <array>
  #include <cstdint>
  #include <cstdlib>
-@@ -208,6 +211,228 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
+@@ -126,9 +130,62 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
+   }
+ }
+ 
++// mp2-nx (0.5.1, issue #3: the HUD gone in the Dark Samus fight): which draws Aurora skips while their pipeline
++// compiles, by pipeline and by where in its pass the draw sits (the HUD and the arm cannon come at the end of the
++// frame's EFB pass, the world before them). Render worker only; logged every 2 s while anything was skipped.
++namespace skiplog {
++uint32_t g_cmdIndex = 0, g_cmdCount = 1;
++struct Entry {
++  uint64_t hash;
++  uint32_t count;
++  double posSum;
++};
++std::vector<Entry> g_entries;
++uint64_t g_total = 0;
++auto g_windowStart = std::chrono::steady_clock::now();
++void note(uint64_t hash) {
++  ++g_total;
++  const double pos = double(g_cmdIndex) / double(std::max<uint32_t>(g_cmdCount, 1));
++  for (auto& e : g_entries) {
++    if (e.hash == hash) {
++      ++e.count;
++      e.posSum += pos;
++      return;
++    }
++  }
++  if (g_entries.size() < 256) {
++    g_entries.push_back({hash, 1, pos});
++  }
++}
++void maybe_report() {
++  const auto now = std::chrono::steady_clock::now();
++  if (now - g_windowStart < std::chrono::seconds(2)) {
++    return;
++  }
++  g_windowStart = now;
++  if (g_total == 0) {
++    return;
++  }
++  std::sort(g_entries.begin(), g_entries.end(), [](const Entry& a, const Entry& b) { return a.count > b.count; });
++  std::string top;
++  for (size_t i = 0; i < g_entries.size() && i < 8; ++i) {
++    const auto& e = g_entries[i];
++    top += fmt::format("{}{:016x} x{} at {:.0f}% of its pass", i ? ", " : "", e.hash, e.count,
++                       100.0 * e.posSum / e.count);
++  }
++  std::fprintf(stderr, "[skips] %llu draws skipped in the last 2 s, waiting for %zu pipeline(s) to compile: %s\n",
++               static_cast<unsigned long long>(g_total), g_entries.size(), top.c_str());
++  g_total = 0;
++  g_entries.clear();
++}
++} // namespace skiplog
++
+ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
+   ZoneScoped;
+   g_currentPipeline = UINTPTR_MAX;
++  skiplog::maybe_report();
++  skiplog::g_cmdIndex = 0;
++  skiplog::g_cmdCount = static_cast<uint32_t>(passInfo.commands.size());
+ #ifdef AURORA_GFX_DEBUG_GROUPS
+   std::vector<std::string> lastDebugGroupStack;
+ #endif
+@@ -143,6 +200,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
+   g_currentTextureGroup = 0;
+ 
+   for (auto& cmd : passInfo.commands) {
++    ++skiplog::g_cmdIndex;
+ #ifdef AURORA_GFX_DEBUG_GROUPS
+     {
+       size_t firstDiff = lastDebugGroupStack.size();
+@@ -208,6 +266,228 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
  #endif
  }
  
@@ -538,7 +610,7 @@ index 28f8828b1..c1395fe70 100644
  void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo, uint32_t passIndex) {
    ZoneScoped;
    if (!passInfo.sealed) {
-@@ -218,6 +443,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+@@ -218,6 +498,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
      tex_palette_conv::run(cmd, conv);
    }
    if (passInfo.discardable) {
@@ -546,7 +618,7 @@ index 28f8828b1..c1395fe70 100644
      // This pass has no effect and can be safely discarded (e.g. an empty EFB segment between two back-to-back pass
      // breaks, or an unresolved offscreen pass).
      if (passInfo.forceDepthSnapshot) {
-@@ -457,6 +683,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
+@@ -457,6 +738,7 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
    if (passInfo.snapshotDepthDst) {
      tex_copy_conv::snapshot_depth(cmd, passInfo.copySourceDepthView, passInfo.msaaSamples, passInfo.snapshotDepthDst);
    }
@@ -554,7 +626,15 @@ index 28f8828b1..c1395fe70 100644
  }
  
  constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return value & ~3u; }
-@@ -649,4 +876,60 @@ void bind_texture_group(BindGroupRef ref, const wgpu::RenderPassEncoder& pass) {
+@@ -633,6 +915,7 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
+   wgpu::RenderPipeline pipeline;
+   if (!get_pipeline(ref, pipeline)) {
+     note_skipped_draw();
++    skiplog::note(static_cast<uint64_t>(ref));
+     return false;
+   }
+   pass.SetPipeline(pipeline);
+@@ -649,4 +932,60 @@ void bind_texture_group(BindGroupRef ref, const wgpu::RenderPassEncoder& pass) {
  }
  
  void forget_texture_group() { g_currentTextureGroup = 0; }
@@ -616,10 +696,27 @@ index 28f8828b1..c1395fe70 100644
 +  return aurora::gfx::capture::g_doneCount;
 +}
 diff --git a/lib/gfx/frame.cpp b/lib/gfx/frame.cpp
-index 34ff0f864..7511b7025 100644
+index 34ff0f864..ef4da80c3 100644
 --- a/lib/gfx/frame.cpp
 +++ b/lib/gfx/frame.cpp
-@@ -1165,7 +1165,9 @@ void end_frame(EndFrameCallback callback) {
+@@ -1,5 +1,7 @@
+ #include "frame.hpp"
+ 
++#include <aurora/phase.hpp>
++
+ #include "depth_peek.hpp"
+ #include "efb_copy.hpp"
+ #include "scan_peek.hpp"
+@@ -1077,6 +1079,8 @@ bool begin_frame() {
+   }
+   // pace_frame_start();
+   const size_t frameSlot = acquire_frame_slot();
++  // mp2-nx (0.5.1, issue #3's 20 s freeze): which of the two waits it is
++  phase::set(phase::Main, "begin_frame (waiting for a staging buffer to map)");
+   const auto stagingSlot = acquire_mapped_staging_buffer();
+   if (!stagingSlot) {
+     g_frameSlots.release(frameSlot);
+@@ -1165,7 +1169,9 @@ void end_frame(EndFrameCallback callback) {
  
  uint32_t current_frame() noexcept { return g_frameIndex; }
  
@@ -655,7 +752,7 @@ index de8c3f93c..f02a1d834 100644
  const wgpu::Buffer& staging_buffer(size_t slot);
  
 diff --git a/lib/gfx/pipeline_cache.cpp b/lib/gfx/pipeline_cache.cpp
-index dfbba6023..24bd50ce7 100644
+index dfbba6023..c963e9a3f 100644
 --- a/lib/gfx/pipeline_cache.cpp
 +++ b/lib/gfx/pipeline_cache.cpp
 @@ -1,4 +1,5 @@
@@ -910,7 +1007,7 @@ index dfbba6023..24bd50ce7 100644
  #ifdef TRACY_ENABLE
    tracy::SetThreadName("Pipeline compilation thread");
  #endif
-@@ -1317,9 +1450,15 @@ static void pipeline_worker() {
+@@ -1317,9 +1450,19 @@ static void pipeline_worker() {
        std::unique_lock lock{g_pipelineMutex};
        if (g_hasPipelineThread) {
          // Several workers share the queues, so check them again under the lock every time.
@@ -922,14 +1019,18 @@ index dfbba6023..24bd50ce7 100644
 +          if (g_pipelineThreadEnd) {
 +            return true;
 +          }
-+          if (index > 0 && !g_bootHelpers.load(std::memory_order_relaxed)) {
++          // mp2-nx (0.5.1, issue #3): ...and, with deko3d, while a room's backlog waits during play (on at 8
++          // queued, off when the queue is empty): they take the WGSL generation and Tint off the one thread
++          // while the uam worker compiles, at low priority on cores 1 and 0 (idle time only).
++          if (index > 0 && !g_bootHelpers.load(std::memory_order_relaxed) &&
++              !g_compileBacklog.load(std::memory_order_relaxed)) {
 +            return false;
 +          }
 +          return !g_pipelineQueue.empty() || (!g_backgroundPipelinesPaused && !g_backgroundPipelineQueue.empty());
          });
        } else if (g_pipelineQueue.empty() && (g_backgroundPipelinesPaused || g_backgroundPipelineQueue.empty())) {
          return;
-@@ -1327,10 +1466,23 @@ static void pipeline_worker() {
+@@ -1327,10 +1470,30 @@ static void pipeline_worker() {
        if (g_pipelineThreadEnd) {
          break;
        }
@@ -938,7 +1039,14 @@ index dfbba6023..24bd50ce7 100644
 +      {
 +        const size_t depth = g_pipelineQueue.size();
 +        if (depth >= 8) {
-+          g_compileBacklog.store(true, std::memory_order_relaxed);
++          if (!g_compileBacklog.exchange(true, std::memory_order_relaxed)) {
++            if (g_compileThreads > 1 && !g_bootHelpers.load(std::memory_order_relaxed)) {
++              std::fprintf(stderr, "[info] [aurora::gfx::pipeline_cache] pipeline cache: %zu waiting: %zu compile "
++                                   "threads until the queue is empty\n",
++                           depth, g_compileThreads);
++            }
++            g_pipelineQueueCv.notify_all();
++          }
 +        } else if (depth == 0) {
 +          g_compileBacklog.store(false, std::memory_order_relaxed);
 +        }
@@ -953,7 +1061,7 @@ index dfbba6023..24bd50ce7 100644
      auto result = create_pipeline_timed(pending.hash, std::move(pending.create));
      {
        std::lock_guard lock{g_pipelineMutex};
-@@ -1724,10 +1876,48 @@ void initialize_pipeline_cache() {
+@@ -1724,10 +1887,48 @@ void initialize_pipeline_cache() {
      g_hasPipelineThread = false;
    } else {
      g_hasPipelineThread = true;
@@ -1003,7 +1111,7 @@ index dfbba6023..24bd50ce7 100644
      Log.info("pipeline cache: {} compile thread(s)", threads);
    }
  
-@@ -1735,6 +1925,11 @@ void initialize_pipeline_cache() {
+@@ -1735,6 +1936,11 @@ void initialize_pipeline_cache() {
    if (!g_pipelineCacheBroken && loadedCount > 0) {
      g_gpuCachePrunePending = true;
    }
@@ -1015,7 +1123,7 @@ index dfbba6023..24bd50ce7 100644
  
    if (!g_pipelineCacheBroken) {
      start_pipeline_cache_writer();
-@@ -1750,6 +1945,12 @@ void shutdown_pipeline_cache() {
+@@ -1750,6 +1956,12 @@ void shutdown_pipeline_cache() {
        thread.join();
      }
      g_pipelineThreads.clear();
@@ -1028,7 +1136,7 @@ index dfbba6023..24bd50ce7 100644
    }
    g_hasPipelineThread = false;
  
-@@ -1858,7 +2059,7 @@ void begin_pipeline_frame() {
+@@ -1858,7 +2070,7 @@ void begin_pipeline_frame() {
  
  void end_pipeline_frame() {
    if (!g_hasPipelineThread) {
@@ -1037,7 +1145,7 @@ index dfbba6023..24bd50ce7 100644
    }
  }
  
-@@ -1942,4 +2143,30 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
+@@ -1942,4 +2154,30 @@ void aurora_get_pipeline_stats(AuroraPipelineStats* stats) {
    stats->known = static_cast<uint32_t>(g_knownPipelines.size());
    stats->pending = static_cast<uint32_t>(g_pendingPipelines.size());
  }
