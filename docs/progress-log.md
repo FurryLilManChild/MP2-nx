@@ -2,6 +2,15 @@
 
 Newest first.
 
+## 2026-11-21: 0.5.1 release build (build 14)
+
+- Build 13 test: the owner got two Dark ammo drops at 0/50 (picked up, 10/50), then none. The log shows why:
+  generator 003200e6 uses RULE ec6568a0 (its rule order matches the logged actions), whose only Power Beam
+  (KLDB) Dark ammo rules need %DAM under 10; at 20% no rule matched. Retail behaviour, so the fix stands.
+- Release: the [drops] logging removed (CScriptPickup.cpp and CScriptPickupGenerator.cpp back to upstream), the
+  debris fix kept. mp2-nx-v0.5.1-switch.zip and release_notes-v0.5.1.md in the owner's out\release folder.
+  NRO sha256 cb94ed59ac53b4a1139e1838cd7f8f0af4e240ce318b5d1fcd8d0fd9e1a5d268.
+
 ## 2026-11-21: GitHub issue #9 fixed: beam ammo drops never appeared (build 13)
 
 - The entry below was wrong to call this retail behaviour; two reporters who know the game said otherwise, and
