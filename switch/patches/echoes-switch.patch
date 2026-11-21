@@ -1215,6 +1215,23 @@ index ea43be9af..3d3d30f34 100644
      if (state->HasPowerUp(beamItems[i])) {
        const float value = player->GetControlMapper().GetAnalogInput(beamCommands[i], input);
        if (value > 0.65f && value > maxInput) {
+diff --git a/src/MetroidPrime/ScriptObjects/CScriptDebris.cpp b/src/MetroidPrime/ScriptObjects/CScriptDebris.cpp
+index 0ad4b8fdf..eb52702a9 100644
+--- a/src/MetroidPrime/ScriptObjects/CScriptDebris.cpp
++++ b/src/MetroidPrime/ScriptObjects/CScriptDebris.cpp
+@@ -480,7 +480,11 @@ void CScriptDebris::AcceptScriptMsg(CStateManager& mgr, const CScriptMsg& msg) {
+       const rstl::vector< SConnection >& connections = GetConnectionList();
+       for (int i = 0; i < connections.size(); ++i) {
+         const SConnection& connection = connections[i];
+-        if (connection.state != kSS_Generate || connection.msg != kSM_Activate) {
++        // mp2-nx (issue #9, no Light/Dark ammo drops): retail tests 'GRNT' here
++        // (AcceptScriptMsg 0x800D2F08: addis -0x4752 / cmplwi 0x4E54, then 'ACTV'), the state
++        // CScriptPickupGenerator::CachePickupTemplates also reads; 'GENR' never matched, so a debris
++        // never made its pickup, and every beam ammo drop (a debris carrying the pickup) vanished.
++        if (connection.state != kSS_GeneratorConnection || connection.msg != kSM_Activate) {
+           continue;
+         }
+ 
 diff --git a/src/MetroidPrime/ScriptObjects/CScriptDock.cpp b/src/MetroidPrime/ScriptObjects/CScriptDock.cpp
 index 18b33af94..5d8f31c0e 100644
 --- a/src/MetroidPrime/ScriptObjects/CScriptDock.cpp

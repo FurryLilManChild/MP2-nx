@@ -2,6 +2,19 @@
 
 Newest first.
 
+## 2026-11-21: GitHub issue #9 fixed: beam ammo drops never appeared (build 13)
+
+- The entry below was wrong to call this retail behaviour; two reporters who know the game said otherwise, and
+  they were right. Build 12 logged every generator decision ([drops]). The owner's run (Dark world, Dark ammo
+  0/50, Power Beam kills): the ammo generator picked Dark ammo again and again ("rules: DKAx(80) ... spawn:
+  00320163 x2"), but no pickup ever followed, while missile and health drops spawned and were collected.
+- Cause: beam ammo templates are Debris objects that carry the pickup (templates "45 x5", "46 x10" come from
+  CachePickupTemplates' debris branch). CScriptDebris::AcceptScriptMsg (NonMatching) generated its object
+  through connections in state kSS_Generate ('GENR'); retail (0x800D2F08) tests 'GRNT' with 'ACTV', so the
+  debris never made its pickup. Fixed to kSS_GeneratorConnection. CScriptCoin has the same 'GENR' test, copied
+  from the debris code, but it has no USA symbol to check against, so it is left alone.
+- Build 13 keeps the [drops] log so the test shows the pickups ("picked up item 45/46").
+
 ## 2026-11-21: GitHub issue #9 (no Light or Dark ammo drops), investigated, no code change
 
 - Report (Gitgood56): up to the Dark Suit, not one Light or Dark ammo drop; guess: the game thinks ammo is full.
