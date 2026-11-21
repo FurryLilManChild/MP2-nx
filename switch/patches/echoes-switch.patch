@@ -1228,3 +1228,171 @@ index 18b33af94..5d8f31c0e 100644
      std::fprintf(stderr, "[dock] player touched dock %d (area %d -> %d)\n", mDock,
                   GetCurrentAreaId().Value(), mArea.Value());
  #endif
+diff --git a/src/MetroidPrime/ScriptObjects/CScriptPickup.cpp b/src/MetroidPrime/ScriptObjects/CScriptPickup.cpp
+index 338bf8af3..9b5bb43f2 100644
+--- a/src/MetroidPrime/ScriptObjects/CScriptPickup.cpp
++++ b/src/MetroidPrime/ScriptObjects/CScriptPickup.cpp
+@@ -1,5 +1,7 @@
+ #include "MetroidPrime/ScriptObjects/CScriptPickup.hpp"
+ 
++#include <cstdio>
++
+ #include "Kyoto/Graphics/CColor.hpp"
+ #include "MetroidPrime/CActorParameters.hpp"
+ #include "MetroidPrime/CAnimData.hpp"
+@@ -378,6 +380,15 @@ void CScriptPickup::Touch(CActor& act, CStateManager& mgr) {
+       playerState->SetItemAmount(itemType, mAmount);
+     }
+     playerState->SetTimeLeft(itemType, mPickupEffectLifetime);
++#ifdef TARGET_PC
++    if (itemType == CPlayerState::kIT_DarkAmmo || itemType == CPlayerState::kIT_LightAmmo ||
++        itemType == CPlayerState::kIT_Missile || itemType == CPlayerState::kIT_HealthRefill) {
++      // mp2-nx issue #9 diagnostic
++      std::fprintf(stderr, "[drops] picked up item %d amount %d capacity %d: now %d/%d\n",
++                   int(itemType), mAmount, mCapacity, playerState->GetItemAmount(itemType),
++                   playerState->GetItemCapacity(itemType));
++    }
++#endif
+ #ifdef TARGET_PC
+     // Randomized location: its script chain ends in a MEMO with the vanilla item's text. Mark
+     // the MEMOs the Arrived connections reach, directly or through relays and timers (which
+diff --git a/src/MetroidPrime/ScriptObjects/CScriptPickupGenerator.cpp b/src/MetroidPrime/ScriptObjects/CScriptPickupGenerator.cpp
+index d9a7fcb57..fb477a072 100644
+--- a/src/MetroidPrime/ScriptObjects/CScriptPickupGenerator.cpp
++++ b/src/MetroidPrime/ScriptObjects/CScriptPickupGenerator.cpp
+@@ -11,8 +11,36 @@
+ #include "MetroidPrime/ScriptObjects/CScriptDebris.hpp"
+ #include "MetroidPrime/ScriptObjects/CScriptPickup.hpp"
+ #include "MetroidPrime/TCastTo.hpp"
++#include <cstdarg>
+ #ifdef TARGET_PC
+ #include "port_savestate.h"
++#include <cstdio>
++// mp2-nx issue #9 diagnostic (Light/Dark ammo never drops): one [drops] block per enemy death.
++static char sDropLog[1024];
++static size_t sDropLogLen = 0;
++static void DropLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
++static void DropLog(const char* fmt, ...) {
++  if (sDropLogLen >= sizeof(sDropLog) - 1) {
++    return;
++  }
++  va_list ap;
++  va_start(ap, fmt);
++  const int n = vsnprintf(sDropLog + sDropLogLen, sizeof(sDropLog) - sDropLogLen, fmt, ap);
++  va_end(ap);
++  if (n > 0) {
++    sDropLogLen += size_t(n);
++    if (sDropLogLen > sizeof(sDropLog) - 1) {
++      sDropLogLen = sizeof(sDropLog) - 1;
++    }
++  }
++}
++static void DropLogFlush() {
++  if (sDropLogLen != 0) {
++    std::fprintf(stderr, "[drops] %s\n", sDropLog);
++  }
++  sDropLogLen = 0;
++  sDropLog[0] = 0;
++}
+ #endif
+ 
+ CPickupGeneratorRuleEvaluator::CPickupGeneratorRuleEvaluator(CAssetId rules)
+@@ -48,9 +76,33 @@ void CPickupGeneratorRuleEvaluator::Refresh(CStateManager& mgr, const CHealthInf
+     const CScriptPickup* pickup = TCastToConstPtr< CScriptPickup >(actors[index]);
+     if (pickup != nullptr && pickup->GetActive() && pickup->GetCapacity() == 0) {
+       mPendingItemAmounts[pickup->GetItem()] += pickup->GetAmount();
++#ifdef TARGET_PC
++      if (pickup->GetItem() == CPlayerState::kIT_DarkAmmo ||
++          pickup->GetItem() == CPlayerState::kIT_LightAmmo) {
++        DropLog("pend %s+%d(uid %04x area %d) ",
++                pickup->GetItem() == CPlayerState::kIT_DarkAmmo ? "D" : "L", pickup->GetAmount(),
++                unsigned(pickup->GetUniqueId().Value()), int(pickup->GetCurrentAreaId().Value()));
++      }
++#endif
+     }
+   }
+ 
++#ifdef TARGET_PC
++  {
++    CPlayerState& st = *mgr.PlayerState(0);
++    DropLog("weapon %d%s%s health %s | dark %d/%d +%d beam %d | light %d/%d +%d beam %d | rules: ",
++            int(mLastDamageWeapon.GetType()), mLastDamageWeapon.IsCharged() ? " charged" : "",
++            mLastDamageWeapon.IsComboed() ? " combo" : "", health != nullptr ? "yes" : "NO",
++            st.GetItemAmount(CPlayerState::kIT_DarkAmmo),
++            st.GetItemCapacity(CPlayerState::kIT_DarkAmmo),
++            mPendingItemAmounts[CPlayerState::kIT_DarkAmmo],
++            st.GetItemCapacity(CPlayerState::kIT_DarkBeam),
++            st.GetItemAmount(CPlayerState::kIT_LightAmmo),
++            st.GetItemCapacity(CPlayerState::kIT_LightAmmo),
++            mPendingItemAmounts[CPlayerState::kIT_LightAmmo],
++            st.GetItemCapacity(CPlayerState::kIT_LightBeam));
++  }
++#endif
+   EvaluateRules();
+   mManager = nullptr;
+ }
+@@ -176,6 +228,12 @@ int CPickupGeneratorRuleEvaluator::ExecuteAction(const CRuleAction& action) {
+   if (action.GetPropertyCount() > 2) {
+     maximum = action.GetProperty(2).GetInt();
+   }
++#ifdef TARGET_PC
++  {
++    const FourCC id = action.GetId();
++    DropLog("%c%c%c%c(%g) ", char(id >> 24), char(id >> 16), char(id >> 8), char(id), chance);
++  }
++#endif
+   switch (action.GetId()) {
+   case 'SLMS':
+     return SetAmountRange(chance, 0, minimum, maximum);
+@@ -272,8 +330,18 @@ static inline void AddSpawnablePickup(const CPickupGeneratorRuleEvaluator& evalu
+ 
+ void CScriptPickupGenerator::GetSpawnablePickups(
+     CStateManager& mgr, rstl::vector< rstl::pair< int, TEditorId > >& pickups, TUniqueId targetId) {
++#ifdef TARGET_PC
++  DropLog("gen %08x target %04x: ", unsigned(GetEditorId().value), unsigned(targetId.Value()));
++#endif
+   mRuleEvaluator.Refresh(mgr, GetTargetHealthInfo(mgr, targetId));
+   pickups.reserve(mPickupTemplates.size());
++#ifdef TARGET_PC
++  DropLog("| templates:");
++  for (rstl::vector< SPickupTemplate >::const_iterator it = mPickupTemplates.begin();
++       it != mPickupTemplates.end(); ++it) {
++    DropLog(" %d x%d", int(it->mItem), it->mAmount);
++  }
++#endif
+ 
+   for (rstl::vector< SPickupTemplate >::const_iterator it = mPickupTemplates.begin();
+        it != mPickupTemplates.end(); ++it) {
+@@ -331,6 +399,14 @@ void CScriptPickupGenerator::GetSpawnablePickups(
+       break;
+     }
+   }
++#ifdef TARGET_PC
++  DropLog(" | spawn:");
++  for (rstl::vector< rstl::pair< int, TEditorId > >::const_iterator it = pickups.begin();
++       it != pickups.end(); ++it) {
++    DropLog(" %08x x%d", unsigned(it->second.value), it->first);
++  }
++  DropLogFlush();
++#endif
+ }
+ 
+ void CScriptPickupGenerator::SpawnPickup(CStateManager& mgr, TEditorId templateId,
+@@ -343,9 +419,17 @@ void CScriptPickupGenerator::SpawnPickup(CStateManager& mgr, TEditorId templateI
+   const CScriptObjectLoaderHelper::SGeneratedObject generated =
+       mgr.ScriptObjectLoaderHelper().GenerateScriptObject(templateId, mgr);
+   if (generated.mUniqueId == kInvalidUniqueId) {
++#ifdef TARGET_PC
++    std::fprintf(stderr, "[drops] spawn %08x FAILED (no object)\n", unsigned(templateId.value));
++#endif
+     return;
+   }
+ #ifdef TARGET_PC
++  if (const CScriptPickup* p = TCastToConstPtr< CScriptPickup >(generated.mEntity)) {
++    std::fprintf(stderr, "[drops] spawned %04x item %d x%d active %d\n",
++                 unsigned(generated.mUniqueId.Value()), int(p->GetItem()), p->GetAmount(),
++                 int(p->GetActive()));
++  }
+   PortSaveState::NoteGenerated(mgr, generated.mUniqueId.value);
+ #endif
+ 
