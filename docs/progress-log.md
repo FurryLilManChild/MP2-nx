@@ -2,6 +2,26 @@
 
 Newest first.
 
+## 2026-11-21: GitHub issue #9 (no Light or Dark ammo drops), investigated, no code change
+
+- Report (Gitgood56): up to the Dark Suit, not one Light or Dark ammo drop; guess: the game thinks ammo is full.
+- Echoes Unbound marks `CScriptPickupGenerator.cpp` NonMatching, so it was compared with the retail DOL
+  (G2ME01 main.dol, capstone; addresses from config/G2ME01/symbols.txt): Refresh 0x8010E5C8, GetConditionValue
+  0x8010DC74, ExecuteAction 0x8010D8A0, SetAmountRange 0x8010DBD8, GetRandomAmount 0x8010D858,
+  GetSpawnablePickups 0x8010CF28, AcceptScriptMsg 0x8010C7A4, CachePickupTemplates 0x8010CB04. Every condition
+  (types, item ids, pending-pickup offsets, weapon tests), every action-to-slot mapping, the stop-on-success
+  return and the amount-to-slot template mapping match retail. One harmless difference: retail takes only the
+  first pickup inside a debris template; the port loops over all of them.
+- The disc's 53 RULE files (all uncompressed, read from the PAKs) store the ammo conditions in the types the
+  code returns (%DAM/%LAM float, CDAM/CLAM and ADAM/ALAM int, the ?/K tests bool), so no type mismatch.
+- The retail rules explain the report: Dark ammo drops come from Light Beam kills (KWLB) and Light ammo from
+  Dark Beam kills (KWDB, only once the Light Beam is owned or Light ammo capacity is above 0). Power Beam kills
+  (KLDB) drop beam ammo only when that ammo is low: in RULE ec6568a0 only below 10%; in 3ba8371a 12.5% below
+  50% and 10% otherwise when not full; c24b9fa7/7f835cb4 at 0. So before the Light Beam, Dark ammo drops are
+  rare unless nearly empty, as on the GameCube.
+- Next: the owner checks on hardware (drain Dark ammo under 10%, kill with the Power Beam). A failure there
+  would point outside the generator (player ammo state, pickup spawning).
+
 ## 2026-11-11: 0.5.1: GitHub issues #3 (HUD gone against Dark Samus) and #4 (quiet sound)
 
 - Issue #3 (LFranco1213; the owner saw it too): in the first Dark Samus fight's second phase the HUD, the arm
