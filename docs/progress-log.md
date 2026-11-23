@@ -2,6 +2,14 @@
 
 Newest first.
 
+## 2026-11-23: GitHub issue #10 (crash entering a Temple Grounds morph ball tunnel): EUR disc
+
+- crash.txt (build 14): CGameAllocator::FindFreeBlock read a free-list pointer of junk (far 0xe0226521640b0320)
+  while CCollisionCache reserved its buffer under CGameCollision::MovePlayer: game heap corrupted earlier.
+- Cause: the reporter's disc was the PAL one. The log said so at boot ("disc: Metroid Prime 2: Echoes PAL
+  (G2MP01), experimental: USA 1.00 code on PAL data"); missed on the first read. He confirmed the USA disc
+  passes the tunnel. Echoes Unbound runs USA code on PAL data only experimentally; EUR support is issue #1.
+
 ## 2026-11-21: 0.5.1 release build (build 14)
 
 - Build 13 test: the owner got two Dark ammo drops at 0/50 (picked up, 10/50), then none. The log shows why:
