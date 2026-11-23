@@ -9,6 +9,9 @@ Newest first.
 - Cause: the reporter's disc was the PAL one. The log said so at boot ("disc: Metroid Prime 2: Echoes PAL
   (G2MP01), experimental: USA 1.00 code on PAL data"); missed on the first read. He confirmed the USA disc
   passes the tunnel. Echoes Unbound runs USA code on PAL data only experimentally; EUR support is issue #1.
+- Queued for the next build (owner's go-ahead, to ride along with the next issue): an on-screen notice at boot
+  when the disc is not G2ME01 (for example "Europe disc detected: experimental, may crash"), so players learn it
+  before a crash instead of from the log line.
 
 ## 2026-11-21: 0.5.1 release build (build 14)
 
